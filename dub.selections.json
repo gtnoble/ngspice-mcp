@@ -1,0 +1,11 @@
+{
+	"fileVersion": 1,
+	"versions": {
+		"d2sqlite3": "1.0.0",
+		"mcp": {"path":"../d-mcp-server"},
+		"mir-algorithm": "3.21.0",
+		"mir-core": "1.7.1",
+		"silly": "1.1.1",
+		"unit-threaded": "2.1.9"
+	}
+}

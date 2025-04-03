@@ -1,0 +1,57 @@
+{
+    "name": "ngspice-mcp",
+    "description": "Model Context Protocol server for ngspice circuit simulation",
+    "authors": ["Garret Noble"],
+    "copyright": "Copyright © 2024, Garret Noble",
+    "license": "MIT",
+    "dependencies": {
+        "mcp": {
+            "path": "../d-mcp-server"
+        },
+        "mir-algorithm": "~>3.21.0",
+        "d2sqlite3": "~>1.0.0"
+    },
+    "configurations": [
+        {
+            "name": "server",
+            "targetType": "executable",
+            "targetName": "ngspice-mcp",
+            "mainSourceFile": "source/app.d",
+            "description": "Run as MCP server for ngspice integration",
+            "preBuildCommands": ["dub run --config=database-builder"]
+        },
+        {
+            "name": "build-tool",
+            "targetType": "executable",
+            "targetName": "ngspice-model-extract",
+            "mainSourceFile": "source/app.d",
+            "description": "Run as build tool for model extraction"
+        },
+        {
+            "name": "library",
+            "targetType": "library",
+            "targetName": "ngspice-mcp"
+        },
+        {
+            "name": "database-builder",
+            "targetType": "executable",
+            "targetName": "database-builder",
+            "mainSourceFile": "build.d",
+            "description": "Build the model database"
+        },
+        {
+            "name": "unittest",
+            "targetType": "executable",
+            "targetName": "ngspice-mcp-test",
+            "mainSourceFile": "source/app.d",
+            "dependencies": {
+                "unit-threaded": "~>2.1.2"
+            },
+            "sourcePaths": ["source", "source/test"],
+            "importPaths": ["source"]
+        }
+    ],
+    "buildRequirements": ["allowWarnings"],
+    "libs": ["ngspice"],
+    "copyFiles": ["resources/models/*"]
+}

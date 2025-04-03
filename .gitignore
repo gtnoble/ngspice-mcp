@@ -1,0 +1,7 @@
+memory-bank
+resources
+database-builder
+ngspice-mcp
+libngspice-mcp.a
+bin
+test_models.sp
