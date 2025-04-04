@@ -5,3 +5,6 @@ ngspice-mcp
 libngspice-mcp.a
 bin
 test_models.sp
+ngspice-mcp-test
+ngspice-model-extract
+.clinerules

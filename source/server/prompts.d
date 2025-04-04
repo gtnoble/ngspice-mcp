@@ -11,18 +11,6 @@ string ngspiceUsagePrompt() {
 
 The ngspice MCP server provides circuit simulation capabilities through the Model Context Protocol (MCP). This server allows you to perform electronic circuit simulations using ngspice, a powerful open-source circuit simulator, without requiring direct integration with simulation libraries.
 
-## Command Line Options
-
-The server supports the following command line options:
-
-- `--max-points`: Maximum number of points that can be returned by getVectorData (default: 100)
-- `--working-dir`: Working directory for netlist files and ngspice operations (default: current directory)
-
-Example usage:
-```shell
-./ngspice-mcp --working-dir=/path/to/netlists --max-points=200
-```
-
 ## Available Tools
 
 The server provides the following tools for circuit simulation:
@@ -198,6 +186,103 @@ Retrieves data for one or more vectors from a plot.
 - The `interval` parameter is useful for focusing on specific time/frequency ranges
 - Vector names are automatically prefixed with the plot name if not already included
 
+## Model Database Features
+
+The server provides access to a model database that enables circuit model searching capabilities through the Model Context Protocol.
+
+### Model Search Tool
+
+The server provides the `queryModels` tool for searching device models:
+
+**Parameters:**
+- `modelType` (string, required): Type of model to search for (e.g., 'nmos', 'pmos', 'diode'). Case-insensitive.
+- `name` (string, optional): Pattern to match model names. Case-insensitive.
+- `parameterRanges` (object, optional): Parameter range constraints
+  - Format: `{"paramName": {"min": number, "max": number}}`
+  - Parameter names are case-insensitive
+  - Both min and max are optional
+
+**Example:**
+```json
+{
+  "modelType": "nmos",
+  "name": "test%",
+  "parameterRanges": {
+    "l": {"min": 0.1e-6, "max": 0.2e-6},
+    "w": {"min": 1e-6}
+  }
+}
+```
+
+**Example Response:**
+```json
+{
+  "tsmc_018_nmos": {
+    "parameters": {
+      "l": "0.18u",
+      "w": "1u",
+      "vth0": "0.3"
+    }
+  },
+  "tsmc_018_nmos_rf": {
+    "parameters": {
+      "l": "0.18u",
+      "w": "2u",
+      "vth0": "0.35"
+    }
+  }
+}
+```
+
+**Notes:**
+- Searches are case-insensitive for model types, names, and parameter names
+- Name patterns use SQL LIKE syntax (% for wildcard)
+- Parameter ranges only apply to numeric parameters
+- Results include all parameters for matched models
+
+### Model Query Workflows
+
+1. Basic model type search:
+```json
+// Tool: queryModels
+{
+  "modelType": "nmos"
+}
+```
+
+2. Search with manufacturer pattern:
+```json
+// Tool: queryModels
+{
+  "modelType": "pmos",
+  "name": "tsmc%"
+}
+```
+
+3. Search by parameter range:
+```json
+// Tool: queryModels
+{
+  "modelType": "nmos",
+  "parameterRanges": {
+    "vth0": {"min": 0.3, "max": 0.5},
+    "l": {"min": 0.18e-6}
+  }
+}
+```
+
+4. Combined search:
+```json
+// Tool: queryModels
+{
+  "modelType": "diode",
+  "name": "bav%",
+  "parameterRanges": {
+    "is": {"max": 1e-12}
+  }
+}
+```
+
 ## Available Resources
 
 The server provides the following resources:
@@ -347,7 +432,6 @@ Standard error output from ngspice. Check this resource for error messages and w
 
 2. **Point Management**:
    - Use the interval parameter to limit data points
-   - Ensure points stay within --max-points limit
    - Consider adjusting simulation step size
    - Select relevant time/frequency ranges only
 
@@ -355,6 +439,24 @@ Standard error output from ngspice. Check this resource for error messages and w
    - For AC analysis, choose the appropriate representation
    - Magnitude-phase is useful for frequency response
    - Rectangular is useful for mathematical operations
+
+### Model Queries
+
+1. **Search Strategies:**
+   - Use case-insensitive searches for flexibility (e.g., 'nmos' matches 'NMOS')
+   - Provide specific model types to narrow results
+   - Use wildcards in name patterns for broader matches (e.g., 'tsmc%')
+
+2. **Parameter Ranges:**
+   - Only specify ranges when needed to filter results
+   - Use appropriate units for parameter values (e.g., microns for lengths)
+   - Consider numerical precision in comparisons
+   - Parameter names are case-insensitive (e.g., 'vth0' matches 'VTH0')
+
+3. **Result Processing:**
+   - Process all parameters returned for each model
+   - Handle both numeric and string parameter values
+   - Consider parameter units in result interpretation
 
 ## Error Handling
 
@@ -374,6 +476,12 @@ Standard error output from ngspice. Check this resource for error messages and w
    - Vector data exceeds maximum points limit
    - Non-existent vectors or plots
    - Invalid interval ranges
+
+4. **Model Query Errors**:
+   - Unrecognized model type
+   - Invalid parameter range values
+   - Non-numeric values in numeric comparisons
+   - Malformed wildcards in name patterns
 
 ### Troubleshooting
 

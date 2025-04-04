@@ -17,27 +17,27 @@
             "targetType": "executable",
             "targetName": "ngspice-mcp",
             "mainSourceFile": "source/app.d",
-            "description": "Run as MCP server for ngspice integration",
-            "preBuildCommands": ["dub run --config=database-builder"]
-        },
-        {
-            "name": "build-tool",
-            "targetType": "executable",
-            "targetName": "ngspice-model-extract",
-            "mainSourceFile": "source/app.d",
-            "description": "Run as build tool for model extraction"
+            "preBuildCommands": ["dub run --config=database-builder"],
+            "sourcePaths": ["source"],
+            "importPaths": ["source"],
+            "excludedSourceFiles": ["source/test/*"]
         },
         {
             "name": "library",
             "targetType": "library",
-            "targetName": "ngspice-mcp"
+            "targetName": "ngspice-mcp",
+            "sourcePaths": ["source"],
+            "importPaths": ["source"],
+            "excludedSourceFiles": ["source/test/*"]
         },
         {
             "name": "database-builder",
             "targetType": "executable",
             "targetName": "database-builder",
-            "mainSourceFile": "build.d",
-            "description": "Build the model database"
+            "mainSourceFile": "source/build.d",
+            "sourcePaths": ["source"],
+            "importPaths": ["source"],
+            "excludedSourceFiles": ["source/test/*"]
         },
         {
             "name": "unittest",
@@ -52,6 +52,5 @@
         }
     ],
     "buildRequirements": ["allowWarnings"],
-    "libs": ["ngspice"],
-    "copyFiles": ["resources/models/*"]
+    "libs": ["ngspice"]
 }

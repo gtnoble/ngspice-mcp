@@ -60,34 +60,12 @@ Database initializeDatabase(DatabaseConfig config) {
     
     // Enable foreign keys
     db.execute("PRAGMA foreign_keys = ON");
+    db.execute("PRAGMA journal_mode = WAL");
     
     // Create tables and indices
     createModelDatabase(db);
     
     return db;
-}
-
-/// Database connection pool for thread-safe access
-class DatabasePool {
-    private {
-        DatabaseConfig config;
-        Database db;
-    }
-
-    this(DatabaseConfig config) {
-        this.config = config;
-        this.db = initializeDatabase(config);
-    }
-
-    /// Get the database connection
-    Database getConnection() {
-        return db;
-    }
-
-    /// Get the maximum number of results to return
-    size_t getMaxResults() {
-        return config.maxResults;
-    }
 }
 
 version(unittest) {
@@ -96,9 +74,8 @@ version(unittest) {
     import std.uuid : randomUUID;
 
     /// Create a temporary database for testing
-    DatabasePool createTestDatabase() {
+    Database createTestDatabase() {
         string dbPath = buildPath(tempDir, randomUUID().toString ~ ".db");
-        auto config = DatabaseConfig(dbPath);
-        return new DatabasePool(config);
+        return initializeDatabase(DatabaseConfig(dbPath));
     }
 }

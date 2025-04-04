@@ -7,6 +7,11 @@ import std.process;
 import std.array;
 import std.algorithm;
 
+import database.schema;
+import database.queries;
+import parser.netlist;
+import d2sqlite3;
+
 void main() {
     writeln("Building model database...");
     
@@ -26,18 +31,21 @@ void main() {
         writeln("Created output directory: ", outputDir);
     }
     
-    // Remove existing database
+    // Initialize database
     if (exists(dbPath)) {
         remove(dbPath);
         writeln("Removed existing database");
     }
     
+    auto db = initializeDatabase(DatabaseConfig(dbPath));
+    writeln("Initialized database schema");
+
     // Find all model files
     string[] modelFiles;
     if (exists(resourceDir)) {
         try {
             modelFiles = dirEntries(resourceDir, SpanMode.depth)
-                .filter!(e => e.name.endsWith(".sp") || e.name.endsWith(".cir"))
+                .filter!(e => e.name.endsWith(".sp") || e.name.endsWith(".cir") || e.name.endsWith(".lib"))
                 .map!(e => e.name)
                 .array;
             
@@ -51,24 +59,16 @@ void main() {
         writeln("No model files found. Creating empty database.");
     }
     
-    // Build extraction command
-    auto cmd = ["dub", "run", "--config=build-tool", "--", 
-                "--db=" ~ dbPath];
-    
-    // Add model files to command if any exist
-    cmd ~= modelFiles;
-    
-    // Execute model extraction
-    writeln("Executing: ", cmd.join(" "));
-    auto result = execute(cmd);
-    
-    writeln("Command output:");
-    writeln(result.output);
-    
-    if (result.status != 0) {
-        writeln("Error building database: ", result.output);
-        return;
+    // Parse model files directly
+    if (modelFiles.length > 0) {
+        auto queries = new DatabaseQueries(db);
+        auto parser = new NetlistParser(null);  // No log file for build process
+        
+        foreach (file; modelFiles) {
+            writefln("Processing %s...", file);
+            parser.parseFile(file, queries);
+        }
     }
     
-    writeln("Database built successfully at: ", dbPath);
+    writefln("Database built successfully at: %s", dbPath);
 }

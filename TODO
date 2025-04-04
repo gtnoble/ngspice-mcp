@@ -1,1 +1,2 @@
-removed debugging code
+Make sure that `Meg` is parsed for 1E6
+Make sure that only outer level subcircuits and models are parsed

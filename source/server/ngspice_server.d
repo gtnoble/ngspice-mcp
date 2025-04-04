@@ -27,7 +27,9 @@ import mcp.protocol : MCPError, ErrorCode;
 import mcp.resources : ResourceContents;
 import mcp.prompts : PromptResponse, PromptMessage, PromptArgument;
 
+import d2sqlite3;
 import bindings.ngspice;
+import database.queries;
 import server.output;
 import server.prompts : ngspiceUsagePrompt;
 
@@ -38,6 +40,43 @@ class NgspiceServer : MCPServer {
     private bool initialized = false;
     private int maxPoints;
     private string workingDir;
+    private Nullable!Database db;
+    private size_t maxResults;
+
+    import std.typecons : Nullable, nullable;
+
+    /**
+     * Constructor using default stdio transport
+     *
+     * Sets up ngspice-specific tools and resources.
+     *
+     * Params:
+     *   maxPoints = Maximum number of points for vector data
+     *   workingDir = Working directory for netlist files and ngspice operations
+     *   db = Database connection for model queries
+     *   maxResults = Maximum number of query results
+     */
+    /**
+     * Constructor with optional database parameter.
+     *
+     * Sets up ngspice-specific tools and resources.
+     *
+     * Params:
+     *   maxPoints = Maximum number of points for vector data
+     *   workingDir = Working directory for netlist files and ngspice operations
+     *   maxResults = Maximum number of query results
+     *   db = Optional database connection for model queries (default: Database.init)
+     */
+    this(int maxPoints, string workingDir, size_t maxResults, Database db = Database.init) {
+        super("ngspice", "1.0.0");
+        this.maxPoints = maxPoints;
+        this.workingDir = workingDir;
+        this.maxResults = maxResults;
+        if (db != Database.init) {
+            this.db = nullable(db);
+        }
+        setupServer();
+    }
 
     /**
      * Constructor with transport and configuration options
@@ -48,31 +87,26 @@ class NgspiceServer : MCPServer {
      *   transport = MCP transport layer
      *   maxPoints = Maximum number of points for vector data
      *   workingDir = Working directory for netlist files and ngspice operations
+     *   maxResults = Maximum number of query results
+     *   db = Optional database connection for model queries (default: Database.init)
      */
-    this(Transport transport, int maxPoints = 100, string workingDir = ".") {
+    this(Transport transport, int maxPoints, string workingDir, size_t maxResults, Database db = Database.init) {
         super(transport, "ngspice", "1.0.0");
         this.maxPoints = maxPoints;
         this.workingDir = workingDir;
-        setupServer();
-    }
-
-    /**
-     * Constructor using default stdio transport
-     *
-     * Sets up ngspice-specific tools and resources.
-     *
-     * Params:
-     *   maxPoints = Maximum number of points for vector data
-     *   workingDir = Working directory for netlist files and ngspice operations
-     */
-    this(int maxPoints = 100, string workingDir = ".") {
-        super("ngspice", "1.0.0");
-        this.maxPoints = maxPoints;
-        this.workingDir = workingDir;
+        this.maxResults = maxResults;
+        if (db != Database.init) {
+            this.db = nullable(db);
+        }
         setupServer();
     }
 
     private void setupServer() {
+        // Add model query tool if database is provided
+        if (!db.isNull) {
+            setupModelQueryTool();
+        }
+
         // Add usage prompt for LLMs
         addPrompt(
             "usage",
@@ -154,8 +188,7 @@ class NgspiceServer : MCPServer {
         addTool(
             "getPlotNames",
             "Get names of available plots",
-            SchemaBuilder.object()
-                .setDescription("Lists all available simulation result plots. Plot names typically include a type prefix and number (e.g. 'op1' for operating point, 'tran1' for transient, 'ac1' for AC analysis, 'dc1' for DC sweep). The most recent plot of each type is usually numbered '1'."),
+            SchemaBuilder.object(),
             &getPlotNamesTool
         );
 
@@ -232,6 +265,81 @@ class NgspiceServer : MCPServer {
     }
 
     // Tool implementations
+
+    private void setupModelQueryTool() {
+        auto schema = SchemaBuilder.object()
+            .addProperty("modelType", SchemaBuilder.string_()
+                .setDescription("Type of model to query (e.g. 'nmos', 'pmos', 'diode')"))
+            .addProperty("name", SchemaBuilder.string_()
+                .setDescription("Pattern to match model names"))
+                .optional()
+            .addProperty("parameterRanges", SchemaBuilder.object()
+                .addProperty("min", SchemaBuilder.number())
+                    .setDescription("Minimum value for the parameter")
+                    .optional()
+                .addProperty("max", SchemaBuilder.number())
+                    .setDescription("Maximum value for the parameter")
+                    .optional()
+                .setDescription("Parameter range constraints"))
+                .optional();
+
+        addTool(
+            "queryModels",
+            "Query device models from the database",
+            schema,
+            &queryModelsTool
+        );
+    }
+
+    private JSONValue queryModelsTool(JSONValue args) {
+        enforce(!db.isNull, "Database not initialized");
+        auto queries = new DatabaseQueries(db.get());
+        
+        // Build filter from params
+        ModelFilter filter;
+        filter.modelType = args["modelType"].str;
+        filter.maxResults = maxResults;
+        
+        if (auto name = "name" in args) {
+            filter.namePattern = name.str;
+        }
+        
+        if (auto ranges = "parameterRanges" in args) {
+            import std.typecons : Nullable;
+            
+            foreach (string param, value; ranges.objectNoRef) {
+                ParameterRange range;
+                
+                if (auto min = "min" in value) {
+                    range.min = Nullable!double(min.get!double);
+                }
+                if (auto max = "max" in value) {
+                    range.max = Nullable!double(max.get!double);
+                }
+                
+                filter.ranges[param] = range;
+            }
+        }
+        
+        // Execute query
+        auto results = queries.queryModels(filter);
+        
+        // Format results as JSON
+        JSONValue output = JSONValue.emptyObject;
+        foreach (name, model; results) {
+            JSONValue modelJson = JSONValue.emptyObject;
+            JSONValue paramsJson = JSONValue.emptyObject;
+            
+            foreach (paramName, paramValue; model.parameters) {
+                paramsJson[paramName] = JSONValue(paramValue);
+            }
+            
+            modelJson["parameters"] = paramsJson;
+            output[name] = modelJson;
+        }
+        
+        return output;
+    }
 
     private JSONValue loadCircuitTool(JSONValue args) {
         enforce(initialized, "Ngspice not initialized");

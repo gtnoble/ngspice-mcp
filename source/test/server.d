@@ -10,6 +10,37 @@ import mcp.protocol : MCPError;
 import mcp.transport.stdio : Transport;
 
 import server.ngspice_server;
+import d2sqlite3;
+
+/**
+ * Helper to create an NgspiceServer instance for testing.
+ * 
+ * Params:
+ *   withDatabase = Whether to create and use a test database
+ * Returns: A configured NgspiceServer instance
+ */
+private NgspiceServer createTestServer(bool withDatabase = false) {
+    const int DEFAULT_MAX_POINTS = 1000;
+    const string TEST_WORKING_DIR = ".";  // Current directory for tests
+    const size_t DEFAULT_MAX_RESULTS = 100;
+
+    if (withDatabase) {
+        import database.schema : createTestDatabase;
+        auto db = createTestDatabase();
+        return new NgspiceServer(
+            DEFAULT_MAX_POINTS,
+            TEST_WORKING_DIR,
+            DEFAULT_MAX_RESULTS,
+            db
+        );
+    }
+    
+    return new NgspiceServer(
+        DEFAULT_MAX_POINTS,
+        TEST_WORKING_DIR,
+        DEFAULT_MAX_RESULTS
+    );
+}
 
 // Helper to create JSON arguments
 private JSONValue serializeToJson(string[string] args) {
@@ -36,12 +67,12 @@ unittest {
     scope(exit) if (exists(filename)) remove(filename);
 
     // Create server instance
-    auto server = new NgspiceServer();
+    auto server = createTestServer();
     
     try {
         // Test loading from file
         auto result = server.testLoadNetlistFromFile(["filepath": filename].serializeToJson());
-        assert(result["status"].str == "Circuit loaded successfully", 
+        assert(result["status"].str == "Circuit loaded and simulation run successfully", 
             "Failed to load valid netlist file");
     } catch (Exception e) {
         assert(false, "Exception thrown for valid netlist: " ~ e.msg);
@@ -50,7 +81,7 @@ unittest {
 
 @("loadNetlistFromFile with non-existent file")
 unittest {
-    auto server = new NgspiceServer();
+    auto server = createTestServer();
     
     // Test with non-existent file
     assertThrown!MCPError(
@@ -65,7 +96,7 @@ unittest {
     string filename = createTempNetlist("");
     scope(exit) if (exists(filename)) remove(filename);
 
-    auto server = new NgspiceServer();
+    auto server = createTestServer();
     
     // Test with empty file
     assertThrown!MCPError(
@@ -88,7 +119,7 @@ unittest {
         "Complex Circuit\nV1 in 0 DC 5\nR1 in out 1k\nC1 out 0 1u\nR2 out 0 10k\n.end"
     ];
 
-    auto server = new NgspiceServer();
+    auto server = createTestServer();
 
     foreach (netlist; validNetlists) {
         string filename = createTempNetlist(netlist);
@@ -96,7 +127,7 @@ unittest {
 
         try {
             auto result = server.testLoadNetlistFromFile(["filepath": filename].serializeToJson());
-            assert(result["status"].str == "Circuit loaded successfully",
+            assert(result["status"].str == "Circuit loaded and simulation run successfully",
                 "Failed to load valid netlist variant");
         } catch (Exception e) {
             assert(false, "Exception thrown for valid netlist variant: " ~ e.msg);
