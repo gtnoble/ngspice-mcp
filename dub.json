@@ -7,9 +7,7 @@
     "dependencies": {
         "mcp": {
             "path": "../d-mcp-server"
-        },
-        "mir-algorithm": "~>3.21.0",
-        "d2sqlite3": "~>1.0.0"
+        }
     },
     "configurations": [
         {
@@ -17,7 +15,6 @@
             "targetType": "executable",
             "targetName": "ngspice-mcp",
             "mainSourceFile": "source/app.d",
-            "preBuildCommands": ["dub run --config=database-builder"],
             "sourcePaths": ["source"],
             "importPaths": ["source"],
             "excludedSourceFiles": ["source/test/*"]
@@ -26,15 +23,6 @@
             "name": "library",
             "targetType": "library",
             "targetName": "ngspice-mcp",
-            "sourcePaths": ["source"],
-            "importPaths": ["source"],
-            "excludedSourceFiles": ["source/test/*"]
-        },
-        {
-            "name": "database-builder",
-            "targetType": "executable",
-            "targetName": "database-builder",
-            "mainSourceFile": "source/build.d",
             "sourcePaths": ["source"],
             "importPaths": ["source"],
             "excludedSourceFiles": ["source/test/*"]

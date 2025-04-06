@@ -27,9 +27,7 @@ import mcp.protocol : MCPError, ErrorCode;
 import mcp.resources : ResourceContents;
 import mcp.prompts : PromptResponse, PromptMessage, PromptArgument;
 
-import d2sqlite3;
 import bindings.ngspice;
-import database.queries;
 import server.output;
 import server.prompts : ngspiceUsagePrompt;
 
@@ -40,8 +38,6 @@ class NgspiceServer : MCPServer {
     private bool initialized = false;
     private int maxPoints;
     private string workingDir;
-    private Nullable!Database db;
-    private size_t maxResults;
 
     import std.typecons : Nullable, nullable;
 
@@ -53,28 +49,11 @@ class NgspiceServer : MCPServer {
      * Params:
      *   maxPoints = Maximum number of points for vector data
      *   workingDir = Working directory for netlist files and ngspice operations
-     *   db = Database connection for model queries
-     *   maxResults = Maximum number of query results
      */
-    /**
-     * Constructor with optional database parameter.
-     *
-     * Sets up ngspice-specific tools and resources.
-     *
-     * Params:
-     *   maxPoints = Maximum number of points for vector data
-     *   workingDir = Working directory for netlist files and ngspice operations
-     *   maxResults = Maximum number of query results
-     *   db = Optional database connection for model queries (default: Database.init)
-     */
-    this(int maxPoints, string workingDir, size_t maxResults, Database db = Database.init) {
+    this(int maxPoints, string workingDir) {
         super("ngspice", "1.0.0");
         this.maxPoints = maxPoints;
         this.workingDir = workingDir;
-        this.maxResults = maxResults;
-        if (db != Database.init) {
-            this.db = nullable(db);
-        }
         setupServer();
     }
 
@@ -87,26 +66,15 @@ class NgspiceServer : MCPServer {
      *   transport = MCP transport layer
      *   maxPoints = Maximum number of points for vector data
      *   workingDir = Working directory for netlist files and ngspice operations
-     *   maxResults = Maximum number of query results
-     *   db = Optional database connection for model queries (default: Database.init)
      */
-    this(Transport transport, int maxPoints, string workingDir, size_t maxResults, Database db = Database.init) {
+    this(Transport transport, int maxPoints, string workingDir) {
         super(transport, "ngspice", "1.0.0");
         this.maxPoints = maxPoints;
         this.workingDir = workingDir;
-        this.maxResults = maxResults;
-        if (db != Database.init) {
-            this.db = nullable(db);
-        }
         setupServer();
     }
 
     private void setupServer() {
-        // Add model query tool if database is provided
-        if (!db.isNull) {
-            setupModelQueryTool();
-        }
-
         // Add usage prompt for LLMs
         addPrompt(
             "usage",
@@ -264,83 +232,6 @@ class NgspiceServer : MCPServer {
         );
     }
 
-    // Tool implementations
-
-    private void setupModelQueryTool() {
-        auto schema = SchemaBuilder.object()
-            .addProperty("modelType", SchemaBuilder.string_()
-                .setDescription("Type of model to query (e.g. 'nmos', 'pmos', 'diode')"))
-            .addProperty("name", SchemaBuilder.string_()
-                .setDescription("Pattern to match model names"))
-                .optional()
-            .addProperty("parameterRanges", SchemaBuilder.object()
-                .addProperty("min", SchemaBuilder.number())
-                    .setDescription("Minimum value for the parameter")
-                    .optional()
-                .addProperty("max", SchemaBuilder.number())
-                    .setDescription("Maximum value for the parameter")
-                    .optional()
-                .setDescription("Parameter range constraints"))
-                .optional();
-
-        addTool(
-            "queryModels",
-            "Query device models from the database",
-            schema,
-            &queryModelsTool
-        );
-    }
-
-    private JSONValue queryModelsTool(JSONValue args) {
-        enforce(!db.isNull, "Database not initialized");
-        auto queries = new DatabaseQueries(db.get());
-        
-        // Build filter from params
-        ModelFilter filter;
-        filter.modelType = args["modelType"].str;
-        filter.maxResults = maxResults;
-        
-        if (auto name = "name" in args) {
-            filter.namePattern = name.str;
-        }
-        
-        if (auto ranges = "parameterRanges" in args) {
-            import std.typecons : Nullable;
-            
-            foreach (string param, value; ranges.objectNoRef) {
-                ParameterRange range;
-                
-                if (auto min = "min" in value) {
-                    range.min = Nullable!double(min.get!double);
-                }
-                if (auto max = "max" in value) {
-                    range.max = Nullable!double(max.get!double);
-                }
-                
-                filter.ranges[param] = range;
-            }
-        }
-        
-        // Execute query
-        auto results = queries.queryModels(filter);
-        
-        // Format results as JSON
-        JSONValue output = JSONValue.emptyObject;
-        foreach (name, model; results) {
-            JSONValue modelJson = JSONValue.emptyObject;
-            JSONValue paramsJson = JSONValue.emptyObject;
-            
-            foreach (paramName, paramValue; model.parameters) {
-                paramsJson[paramName] = JSONValue(paramValue);
-            }
-            
-            modelJson["parameters"] = paramsJson;
-            output[name] = modelJson;
-        }
-        
-        return output;
-    }
-
     private JSONValue loadCircuitTool(JSONValue args) {
         enforce(initialized, "Ngspice not initialized");
 
@@ -469,14 +360,6 @@ class NgspiceServer : MCPServer {
             "netlist": JSONValue(netlist)
         ]));
     }
-
-    version(unittest) {
-        // Expose loadNetlistFromFileTool for testing
-        JSONValue testLoadNetlistFromFile(JSONValue args) {
-            return loadNetlistFromFileTool(args);
-        }
-    }
-
 
     /**
      * Find the indices in a real array that correspond to an interval
@@ -671,44 +554,6 @@ private string formatScientific(double value, int decimalPlaces = 2) {
     if (value == 0.0) return format!"0.%de+00"(decimalPlaces);
     
     return format!"%.*e"(decimalPlaces, value);
-}
-
-/**
- * Round a number to a specified number of significant figures.
- */
-double roundToSigFigs(double value, int sigFigs = 3) {
-    import std.math : abs, copysign, floor, log10, pow, round;
-
-    // Handle special cases
-    if (value == 0.0 || !value.isFinite || sigFigs <= 0) return value;
-    
-    // Get absolute value and sign
-    double absVal = abs(value);
-    double sign = copysign(1.0, value);
-    
-    // Find magnitude (position of leftmost digit)
-    double magnitude = floor(log10(absVal));
-    
-    // Calculate scaling factor
-    double scaleFactor = pow(10.0, sigFigs - magnitude - 1);
-    
-    // Scale up, round to integer, scale back down
-    double rounded = round(absVal * scaleFactor) / scaleFactor;
-    
-    // Restore sign and handle edge cases near power-of-10 boundaries
-    double result = sign * rounded;
-    
-    // Verify significant figures
-    string numStr = format!"%.15g"(abs(result));
-    auto digits = numStr.filter!(c => c.isDigit).array.length;
-    if (digits > sigFigs) {
-        // Re-scale if we got too many significant figures
-        scaleFactor = pow(10.0, sigFigs - floor(log10(abs(result))) - 1);
-        rounded = round(abs(result) * scaleFactor) / scaleFactor;
-        result = sign * rounded;
-    }
-    
-    return result;
 }
 
 /**
