@@ -10,7 +10,6 @@ A Model Context Protocol (MCP) server that provides access to ngspice circuit si
 - Comprehensive output capture and redirection
 - Vector data handling with multiple representation formats
 - Support for both server and library usage modes
-- SQLite-based model parameter storage
 - Built-in test suite
 
 ## Requirements
