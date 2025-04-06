@@ -18,7 +18,6 @@ A Model Context Protocol (MCP) server that provides access to ngspice circuit si
 - D compiler (DMD/LDC)
 - ngspice shared library
 - MCP server library (d-mcp-server)
-- SQLite3 library
 - D build system (dub)
 
 ## Installation
