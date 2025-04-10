@@ -10,35 +10,19 @@ import mcp.protocol : MCPError;
 import mcp.transport.stdio : Transport;
 
 import server.ngspice_server;
-import d2sqlite3;
 
 /**
  * Helper to create an NgspiceServer instance for testing.
  * 
- * Params:
- *   withDatabase = Whether to create and use a test database
  * Returns: A configured NgspiceServer instance
  */
-private NgspiceServer createTestServer(bool withDatabase = false) {
+private NgspiceServer createTestServer() {
     const int DEFAULT_MAX_POINTS = 1000;
     const string TEST_WORKING_DIR = ".";  // Current directory for tests
-    const size_t DEFAULT_MAX_RESULTS = 100;
-
-    if (withDatabase) {
-        import database.schema : createTestDatabase;
-        auto db = createTestDatabase();
-        return new NgspiceServer(
-            DEFAULT_MAX_POINTS,
-            TEST_WORKING_DIR,
-            DEFAULT_MAX_RESULTS,
-            db
-        );
-    }
     
     return new NgspiceServer(
         DEFAULT_MAX_POINTS,
-        TEST_WORKING_DIR,
-        DEFAULT_MAX_RESULTS
+        TEST_WORKING_DIR
     );
 }
 
@@ -71,7 +55,7 @@ unittest {
     
     try {
         // Test loading from file
-        auto result = server.testLoadNetlistFromFile(["filepath": filename].serializeToJson());
+        auto result = server.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson());
         assert(result["status"].str == "Circuit loaded and simulation run successfully", 
             "Failed to load valid netlist file");
     } catch (Exception e) {
@@ -85,7 +69,7 @@ unittest {
     
     // Test with non-existent file
     assertThrown!MCPError(
-        server.testLoadNetlistFromFile(["filepath": "nonexistent.sp"].serializeToJson()),
+        server.executeTool("loadNetlistFromFile", ["filepath": "nonexistent.sp"].serializeToJson()),
         "Failed to throw error for non-existent file"
     );
 }
@@ -100,7 +84,7 @@ unittest {
     
     // Test with empty file
     assertThrown!MCPError(
-        server.testLoadNetlistFromFile(["filepath": filename].serializeToJson()),
+        server.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson()),
         "Failed to throw error for empty file"
     );
 }
@@ -126,7 +110,7 @@ unittest {
         scope(exit) if (exists(filename)) remove(filename);
 
         try {
-            auto result = server.testLoadNetlistFromFile(["filepath": filename].serializeToJson());
+            auto result = server.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson());
             assert(result["status"].str == "Circuit loaded and simulation run successfully",
                 "Failed to load valid netlist variant");
         } catch (Exception e) {

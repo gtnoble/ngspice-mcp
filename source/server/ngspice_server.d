@@ -13,7 +13,7 @@ import std.array : array, split;
 import std.exception : enforce;
 import std.math : sqrt, atan2, PI, floor, log10, pow, abs, copysign, round, isFinite;
 import std.format : format;
-import std.algorithm : filter;
+import std.algorithm : filter, min, max;
 import std.string : startsWith;
 import std.ascii : isDigit;
 
@@ -198,6 +198,40 @@ class NgspiceServer : MCPServer {
                         .setDescription("Optional interval to limit data range")),
             &getVectorDataTool
         );
+
+        // Local extrema tool
+        addTool(
+            "getLocalExtrema",
+            "Get local minima and maxima of vectors",
+            SchemaBuilder.object()
+                .addProperty("vectors", SchemaBuilder.array(SchemaBuilder.string_())
+                    .setDescription("Array of vector names to analyze (e.g. ['v(out)', 'i(v1)']). Vector names are case-sensitive."))
+                .addProperty("plot", SchemaBuilder.string_()
+                    .optional()
+                    .setDescription("Name of the plot to query. If omitted, uses current plot."))
+                .addProperty("options", SchemaBuilder.object()
+                    .addProperty("minima", SchemaBuilder.boolean()
+                        .optional()
+                        .setDescription("Include local minima in results (default: true)"))
+                    .addProperty("maxima", SchemaBuilder.boolean()
+                        .optional()
+                        .setDescription("Include local maxima in results (default: true)"))
+                    .addProperty("threshold", SchemaBuilder.number()
+                        .optional()
+                        .setDescription("Minimum height difference for extrema detection (default: 0)"))
+                    .optional()
+                    .setDescription("Options for extrema detection"))
+                .addProperty("interval", SchemaBuilder.object()
+                    .addProperty("start", SchemaBuilder.number()
+                        .optional()
+                        .setDescription("Start value of the scale vector (e.g. time or frequency)"))
+                    .addProperty("end", SchemaBuilder.number()
+                        .optional()
+                        .setDescription("End value of the scale vector (e.g. time or frequency)"))
+                    .optional()
+                    .setDescription("Optional interval to limit data range")),
+            &getLocalExtremaTool
+        );
     }
 
     private void initNgspice() {
@@ -233,7 +267,7 @@ class NgspiceServer : MCPServer {
     }
 
     private JSONValue loadCircuitTool(JSONValue args) {
-        enforce(initialized, "Ngspice not initialized");
+        enforce(this.initialized, "Ngspice not initialized");
 
         auto netlist = args["netlist"].str;
         auto lines = netlist.split("\n");
@@ -256,13 +290,17 @@ class NgspiceServer : MCPServer {
             "Failed to run simulation"
         );
 
+        // Get plots using existing tool
+        auto plotsResult = getPlotNamesTool(JSONValue.emptyObject);
+        
         return JSONValue([
-            "status": "Circuit loaded and simulation run successfully"
+            "status": JSONValue("Circuit loaded and simulation run successfully"),
+            "plots": plotsResult["plots"]  // Add plots from getPlotNamesTool
         ]);
     }
 
     private JSONValue runSimulationTool(JSONValue args) {
-        enforce(initialized, "Ngspice not initialized");
+        enforce(this.initialized, "Ngspice not initialized");
 
         string command = args["command"].str;
         enforce(
@@ -270,13 +308,17 @@ class NgspiceServer : MCPServer {
             "Simulation command failed"
         );
 
+        // Get plots using existing tool
+        auto plotsResult = getPlotNamesTool(JSONValue.emptyObject);
+        
         return JSONValue([
-            "status": "Command executed successfully"
+            "status": JSONValue("Command executed successfully"),
+            "plots": plotsResult["plots"]  // Add plots from getPlotNamesTool
         ]);
     }
 
     private JSONValue getPlotNamesTool(JSONValue args) {
-        enforce(initialized, "Ngspice not initialized");
+        enforce(this.initialized, "Ngspice not initialized");
 
         char** plots = ngSpice_AllPlots();
         string[] plotNames;
@@ -292,7 +334,7 @@ class NgspiceServer : MCPServer {
     }
 
     private JSONValue getVectorNamesTool(JSONValue args) {
-        enforce(initialized, "Ngspice not initialized");
+        enforce(this.initialized, "Ngspice not initialized");
 
         // Get plot name - either specified or current
         string plotName;
@@ -330,7 +372,7 @@ class NgspiceServer : MCPServer {
     }
 
     private JSONValue loadNetlistFromFileTool(JSONValue args) {
-        enforce(initialized, "Ngspice not initialized");
+        enforce(this.initialized, "Ngspice not initialized");
 
         import std.path : buildPath, isAbsolute;
         string filepath = args["filepath"].str;
@@ -408,7 +450,7 @@ class NgspiceServer : MCPServer {
     }
 
     private JSONValue getVectorDataTool(JSONValue args) {
-        enforce(initialized, "Ngspice not initialized");
+        enforce(this.initialized, "Ngspice not initialized");
 
         // Get plot name - either specified or current
         string plotName;
@@ -536,6 +578,106 @@ class NgspiceServer : MCPServer {
             "vectors": vectorData
         ]);
     }
+    
+    private JSONValue getLocalExtremaTool(JSONValue args) {
+        enforce(this.initialized, "Ngspice not initialized");
+
+        // Get plot name - either specified or current
+        string plotName;
+        if ("plot" in args) {
+            plotName = args["plot"].str;
+            // Verify plot exists
+            bool plotFound = false;
+            char** plots = ngSpice_AllPlots();
+            for (int i = 0; plots[i] != null; i++) {
+                import std.string : fromStringz;
+                if (plots[i].fromStringz == plotName) {
+                    plotFound = true;
+                    break;
+                }
+            }
+            enforce(plotFound, "Specified plot does not exist: " ~ plotName);
+        } else {
+            char* curPlot = ngSpice_CurPlot();
+            enforce(curPlot !is null, "No current plot available");
+            import std.string : fromStringz;
+            plotName = curPlot.fromStringz.idup;
+        }
+
+        // Get options
+        bool findMinima = true;
+        bool findMaxima = true;
+        double threshold = 0.0;
+
+        if ("options" in args) {
+            auto options = args["options"];
+            if ("minima" in options) findMinima = options["minima"].boolean;
+            if ("maxima" in options) findMaxima = options["maxima"].boolean;
+            if ("threshold" in options) threshold = options["threshold"].get!double;
+        }
+
+        // Process each vector
+        JSONValue[string] vectorData;
+        foreach (vector; args["vectors"].array) {
+            string vectorName = vector.str;
+            
+            // Format vector name with plot prefix if not already included
+            if (!vectorName.startsWith(plotName ~ ".")) {
+                vectorName = plotName ~ "." ~ vectorName;
+            }
+            
+            vector_info_ptr vec = ngGet_Vec_Info(vectorName.toStringz());
+            
+            // Handle vector not found
+            if (vec is null) {
+                vectorData[vectorName] = JSONValue([
+                    "error": "Vector not found"
+                ]);
+                continue;
+            }
+
+            // Get interval bounds if specified
+            int startIdx = 0;
+            int endIdx = vec.v_length - 1;
+            JSONValue intervalInfo;
+
+            if ("interval" in args) {
+                auto interval = args["interval"];
+                double start = ("start" in interval) ? interval["start"].get!double : double.nan;
+                double end = ("end" in interval) ? interval["end"].get!double : double.nan;
+
+                // Find scale vector using specified plot
+                vector_info_ptr scale = ngGet_Vec_Info((plotName ~ ".scale").toStringz);
+                if (scale && scale.v_realdata) {
+                    findIntervalIndices(scale.v_realdata[0..scale.v_length], start, end, startIdx, endIdx);
+                    intervalInfo = JSONValue([
+                        "start": scale.v_realdata[startIdx],
+                        "end": scale.v_realdata[endIdx]
+                    ]);
+                }
+            }
+
+            // Get scale vector for result formatting
+            vector_info_ptr scale = ngGet_Vec_Info((plotName ~ ".scale").toStringz);
+
+            // Process vector and find extrema
+            JSONValue result = processVectorExtrema(
+                vec, scale, startIdx, endIdx,
+                findMinima, findMaxima, threshold
+            );
+
+            // Add interval info if present
+            if (intervalInfo != JSONValue.init) {
+                result["interval"] = intervalInfo;
+            }
+
+            vectorData[vectorName] = result;
+        }
+
+        return JSONValue([
+            "vectors": vectorData
+        ]);
+    }
 }
 
 /**
@@ -584,6 +726,120 @@ private JSONValue formatComplexValue(double real_part, double imag_part, string 
         ]);
     }
 }
+
+/**
+ * Find local extrema in an array of real values.
+ *
+ * Params:
+ *   values = Array of values to analyze
+ *   threshold = Minimum height difference for extrema detection
+ *   minima = Whether to find local minima
+ *   maxima = Whether to find local maxima
+ * Returns: Array of indices where extrema occur
+ */
+private int[] findLocalExtrema(const double[] values, double threshold = 0.0, bool minima = true, bool maxima = true) {
+    if (values.length < 3) return [];
+    
+    int[] extremaIndices;
+    
+    // Check each point against its neighbors
+    for (int i = 1; i < values.length - 1; i++) {
+        double prev = values[i-1];
+        double curr = values[i];
+        double next = values[i+1];
+        
+        bool isExtremum = false;
+        
+        if (maxima && curr > prev && curr > next) {
+            // Found potential maximum
+            double heightDiff = min(curr - prev, curr - next);
+            if (heightDiff >= threshold) {
+                isExtremum = true;
+            }
+        }
+        else if (minima && curr < prev && curr < next) {
+            // Found potential minimum
+            double heightDiff = min(prev - curr, next - curr);
+            if (heightDiff >= threshold) {
+                isExtremum = true;
+            }
+        }
+        
+        if (isExtremum) {
+            extremaIndices ~= i;
+        }
+    }
+    
+    return extremaIndices;
+}
+
+/**
+ * Get local extrema for a vector.
+ */
+private JSONValue processVectorExtrema(vector_info_ptr vec, vector_info_ptr scale, int startIdx, int endIdx, 
+                                     bool findMinima, bool findMaxima, double threshold) {
+    if (vec.v_length == 0) {
+        return JSONValue([
+            "length": JSONValue(0),
+            "maxima": JSONValue.emptyArray,
+            "minima": JSONValue.emptyArray
+        ]);
+    }
+
+    // Get values for analysis
+    double[] values;
+    values.length = endIdx - startIdx + 1;
+
+    if (vec.v_realdata) {
+        // Real data - use directly
+        for (int i = startIdx; i <= endIdx; i++) {
+            values[i - startIdx] = vec.v_realdata[i];
+        }
+    }
+    else if (vec.v_compdata) {
+        // Complex data - use magnitude
+        for (int i = startIdx; i <= endIdx; i++) {
+            double realPart = vec.v_compdata[i].cx_real;
+            double imagPart = vec.v_compdata[i].cx_imag;
+            values[i - startIdx] = sqrt(realPart * realPart + imagPart * imagPart);
+        }
+    }
+
+    // Find extrema
+    int[] extremaIndices = findLocalExtrema(values, threshold, findMinima, findMaxima);
+
+    // Build result arrays
+    JSONValue[] minima;
+    JSONValue[] maxima;
+
+    foreach (int idx; extremaIndices) {
+        // Create extremum point info
+        JSONValue point = JSONValue([
+            "index": JSONValue(idx + startIdx),
+            "value": JSONValue(formatScientific(values[idx]))
+        ]);
+
+        // Add scale value if available
+        if (scale && scale.v_realdata) {
+            point["scale"] = JSONValue(formatScientific(scale.v_realdata[idx + startIdx]));
+        }
+
+        // Add to appropriate array
+        if (findMinima && values[idx] < values[max(0, idx-1)] && values[idx] < values[min($-1, idx+1)]) {
+            minima ~= point;
+        }
+        else if (findMaxima && values[idx] > values[max(0, idx-1)] && values[idx] > values[min($-1, idx+1)]) {
+            maxima ~= point;
+        }
+    }
+
+    return JSONValue([
+        "length": JSONValue(endIdx - startIdx + 1),
+        "maxima": JSONValue(maxima),
+        "minima": JSONValue(minima)
+    ]);
+}
+
 
 /**
  * Exit handler callback for ngspice
