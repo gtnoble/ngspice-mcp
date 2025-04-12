@@ -12,6 +12,9 @@ import server.ngspice_server;
 struct Config {
     @Option("working-dir", "d")
     string workingDir = ".";
+    
+    @Option("max-points", "p")
+    int maxPoints = 1000;
 }
 
 void main(string[] args) {
@@ -19,7 +22,8 @@ void main(string[] args) {
     
     // Parse command line arguments
     auto helpInfo = args.getopt(
-        "working-dir|d", "Working directory path", &config.workingDir
+        "working-dir|d", "Working directory path", &config.workingDir,
+        "max-points|p", "Maximum number of points for vector data", &config.maxPoints
     );
 
     if (helpInfo.helpWanted) {
@@ -32,7 +36,7 @@ void main(string[] args) {
     }
     
     // Start server
-    auto server = new NgspiceServer(100, config.workingDir);
+    setupServer(config.maxPoints, config.workingDir);
     
-    server.start();
+    ngspiceServer.start();
 }

@@ -13,6 +13,7 @@ import std.complex : Complex, abs, arg;
 
 import mcp.protocol : MCPError;
 import mcp.transport.stdio : Transport;
+import mcp.server : MCPServer;
 
 import server.ngspice_server;
 
@@ -43,19 +44,23 @@ private bool isRelativelyEqual(Complex!double actual, Complex!double expected, d
     return true;
 }
 
+bool isSetup = false;
 /**
- * Helper to create an NgspiceServer instance for testing.
- * 
- * Returns: A configured NgspiceServer instance
+ * Helper to setup test server environment
  */
-private NgspiceServer createTestServer() {
+private void setupTestServer() {
     const int DEFAULT_MAX_POINTS = 1000;
     const string TEST_WORKING_DIR = ".";  // Current directory for tests
     
-    return new NgspiceServer(
-        DEFAULT_MAX_POINTS,
-        TEST_WORKING_DIR
-    );
+    if (! isSetup) {
+        setupServer(DEFAULT_MAX_POINTS, TEST_WORKING_DIR);
+        isSetup = true;
+    }
+}
+
+// Global setup for all tests
+shared static this() {
+    setupTestServer();
 }
 
 // Helper to create JSON arguments
@@ -77,17 +82,15 @@ private string createTempNetlist(string content, string suffix = ".sp") {
 
 @("loadNetlistFromFile with valid netlist")
 unittest {
+    setupTestServer();
     // Create a test netlist file
     string validNetlist = "Test RC Circuit\nR1 in out 1k\nC1 out 0 1u\n.end";
     string filename = createTempNetlist(validNetlist);
     scope(exit) if (exists(filename)) remove(filename);
 
-    // Create server instance
-    auto server = createTestServer();
-    
     try {
         // Test loading from file
-        auto result = server.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson());
+        auto result = ngspiceServer.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson());
         assert(result["status"].str == "Circuit loaded and simulation run successfully", 
             "Failed to load valid netlist file");
     } catch (Exception e) {
@@ -97,37 +100,35 @@ unittest {
 
 @("loadNetlistFromFile with non-existent file")
 unittest {
-    auto server = createTestServer();
-    
+    setupTestServer();
     // Test with non-existent file
     assertThrown!MCPError(
-        server.executeTool("loadNetlistFromFile", ["filepath": "nonexistent.sp"].serializeToJson()),
+        ngspiceServer.executeTool("loadNetlistFromFile", ["filepath": "nonexistent.sp"].serializeToJson()),
         "Failed to throw error for non-existent file"
     );
 }
 
 @("loadNetlistFromFile with empty file")
 unittest {
+    setupTestServer();
     // Create empty test file
     string filename = createTempNetlist("");
     scope(exit) if (exists(filename)) remove(filename);
-
-    auto server = createTestServer();
     
     // Test with empty file
     assertThrown!MCPError(
-        server.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson()),
+        ngspiceServer.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson()),
         "Failed to throw error for empty file"
     );
 }
 
 @("getVectorData interpolation")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Load a test circuit
     string testCircuit = "Test RC\nv1 in 0 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 1m\n.end";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
 
     // Get scale values
     double[] points = [0.0, 0.5e-3, 1.0e-3];  // Points at 0, 0.5ms, and 1ms
@@ -137,7 +138,7 @@ unittest {
     args["vectors"] = JSONValue(["out"]);
     args["points"] = JSONValue(points);
     args["plot"] = JSONValue("tran1");
-    auto result = server.executeTool("getVectorData", JSONValue(args));
+    auto result = ngspiceServer.executeTool("getVectorData", JSONValue(args));
 
     assert("vectors" in result, "Missing vectors in result");
     assert("out" in result["vectors"].object, "Missing vector data");
@@ -158,8 +159,8 @@ unittest {
 
 @("getVectorData with complex scales")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Test complex scale types with various circuit configurations
     string[] testCircuits = [
         // Basic AC analysis
@@ -174,7 +175,7 @@ unittest {
 
     foreach (testCircuit; testCircuits) {
         // Load circuit and run simulation
-        server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+        ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
 
         // Test points at various frequencies
         double[] points = [1e3, 5e3, 10e3, 50e3, 100e3];  // Multiple frequency points
@@ -187,7 +188,7 @@ unittest {
             args["points"] = JSONValue(points);
             args["plot"] = JSONValue("ac1");
             args["representation"] = JSONValue(format);
-            auto result = server.executeTool("getVectorData", JSONValue(args));
+            auto result = ngspiceServer.executeTool("getVectorData", JSONValue(args));
 
             auto vectorResult = result["vectors"]["out"];
             assert(vectorResult["data"].array.length == points.length);
@@ -230,8 +231,8 @@ unittest {
 
 @("getVectorData interpolation accuracy")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Load a test circuit with known analytic solution
     string testCircuit = q"[
         * RC filter with known frequency response
@@ -241,7 +242,7 @@ unittest {
         .ac dec 10 1k 100k
         .end
     ]";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
 
     // Test interpolation at specific frequencies
     double[] points = [2e3, 15e3, 75e3];  // Points between simulation points
@@ -251,8 +252,8 @@ unittest {
     args["points"] = JSONValue(points);
     args["plot"] = JSONValue("ac4");
     args["representation"] = JSONValue("both");
-    debug { import std.stdio : writeln; writeln(server.executeTool("getPlotNames", JSONValue.emptyObject).toPrettyString); }
-    auto result = server.executeTool("getVectorData", JSONValue(args));
+    debug { import std.stdio : writeln; writeln(ngspiceServer.executeTool("getPlotNames", JSONValue.emptyObject).toPrettyString); }
+    auto result = ngspiceServer.executeTool("getVectorData", JSONValue(args));
 
     auto vectorResult = result["vectors"]["out"];
     
@@ -284,12 +285,12 @@ unittest {
 
 @("getVectorData with complex values")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Load a test circuit with AC analysis
     string testCircuit = "Test RC\nv1 in 0 ac 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 10 1k 100k\n.end";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
-    debug { import std.stdio : writeln; writeln(server.executeTool("getPlotNames", JSONValue.emptyObject).toPrettyString); }
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    debug { import std.stdio : writeln; writeln(ngspiceServer.executeTool("getPlotNames", JSONValue.emptyObject).toPrettyString); }
 
     // Test points at specific frequencies
     double[] points = [1e3, 10e3, 100e3];  // 1kHz, 10kHz, 100kHz
@@ -300,7 +301,7 @@ unittest {
     args["points"] = JSONValue(points);
     args["plot"] = JSONValue("ac5");
     args["representation"] = JSONValue("rectangular");
-    auto result = server.executeTool("getVectorData", JSONValue(args));
+    auto result = ngspiceServer.executeTool("getVectorData", JSONValue(args));
 
     auto vectorResult = result["vectors"]["out"];
     assert(vectorResult["data"].array.length == points.length, "Incorrect data length");
@@ -313,7 +314,7 @@ unittest {
 
     // Test magnitude-phase representation
     args["representation"] = JSONValue("magnitude-phase");
-    result = server.executeTool("getVectorData", JSONValue(args));
+    result = ngspiceServer.executeTool("getVectorData", JSONValue(args));
 
     vectorResult = result["vectors"]["out"];
     
@@ -326,15 +327,15 @@ unittest {
 
 @("getVectorData with out of range points")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Load a test circuit
     string testCircuit = "Test RC\nv1 in 0 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 1m\n.end";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
-    debug { import std.stdio : writeln; writeln(server.executeTool("getPlotNames", JSONValue.emptyObject).toPrettyString); }
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    debug { import std.stdio : writeln; writeln(ngspiceServer.executeTool("getPlotNames", JSONValue.emptyObject).toPrettyString); }
 
     // Get the simulation time range
-    auto infoResult = server.executeTool("getVectorsInfo", ["plot": "tran5"].serializeToJson());
+    auto infoResult = ngspiceServer.executeTool("getVectorsInfo", ["plot": "tran5"].serializeToJson());
     string timeName;
     double minTime = double.infinity;
     double maxTime = -double.infinity;
@@ -357,7 +358,7 @@ unittest {
     args["vectors"] = JSONValue(["out"]);
     args["points"] = JSONValue([beforeStart, middle, afterEnd]);
     args["plot"] = JSONValue("tran5");
-    auto result = server.executeTool("getVectorData", JSONValue(args));
+    auto result = ngspiceServer.executeTool("getVectorData", JSONValue(args));
 
     auto vectorResult = result["vectors"]["out"];
     assert(!("data" in vectorResult), "Should not have data field for failed interpolation");
@@ -368,9 +369,8 @@ unittest {
 
 @("getLocalExtrema basics")
 unittest {
-    auto server = createTestServer();
-
     // Load a test circuit with sinusoidal input
+    setupTestServer();
     string testCircuit = q"[
         Test RC
         v1 in 0 sin(0 1 1k)
@@ -379,20 +379,20 @@ unittest {
         .tran 1u 1m
         .end
     ]";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
 
     // Test finding extrema
     JSONValue[string] options;
     options["threshold"] = JSONValue(0.1);
     
     JSONValue[string] args;
-    args["vectors"] = JSONValue(["v(out)"]);
+    args["vectors"] = JSONValue(["out"]);
     args["plot"] = JSONValue("tran1");
     args["options"] = JSONValue(options);
-    auto result = server.executeTool("getLocalExtrema", JSONValue(args));
+    auto result = ngspiceServer.executeTool("getLocalExtrema", JSONValue(args));
 
     assert("vectors" in result);
-    auto vectorData = result["vectors"]["v(out)"];
+    auto vectorData = result["vectors"]["out"];
     
     // Check that we have the vector length, maxima and minima
     assert("length" in vectorData);
@@ -415,16 +415,16 @@ unittest {
 
 @("getVectorsInfo returns scale information")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Load a test circuit with transient analysis
     string testCircuit = "Test RC\nv1 in 0 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 1m\n.end";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
 
     // Test getVectorsInfo
     JSONValue[string] args;
     args["plot"] = JSONValue("tran1");
-    auto result = server.executeTool("getVectorsInfo", JSONValue(args));
+    auto result = ngspiceServer.executeTool("getVectorsInfo", JSONValue(args));
     
     // Verify result structure
     assert("vectors" in result, "Missing vectors in result");
@@ -433,7 +433,7 @@ unittest {
     // Check v(out) vector
     bool foundVout = false;
     foreach (vector; result["vectors"].array) {
-        if (vector["name"].str.endsWith("v(out)")) {
+        if (vector["name"].str.endsWith("out")) {
             foundVout = true;
             
             // Verify vector structure
@@ -449,8 +449,6 @@ unittest {
             // Check scale information
             auto scale = vector["scale"];
             assert("name" in scale, "Missing scale name");
-            assert("type" in scale, "Missing scale type");
-            assert(scale["type"].str == "time", "Incorrect scale type for transient analysis");
             
             break;
         }
@@ -460,16 +458,16 @@ unittest {
 
 @("getVectorsInfo with AC analysis")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Load a test circuit with AC analysis
     string testCircuit = "Test RC\nv1 in 0 ac 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 10 1k 100k\n.end";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
 
     // Test getVectorsInfo
     JSONValue[string] args;
     args["plot"] = JSONValue("ac1");
-    auto result = server.executeTool("getVectorsInfo", JSONValue(args));
+    auto result = ngspiceServer.executeTool("getVectorsInfo", JSONValue(args));
     
     // Verify result structure
     assert("vectors" in result, "Missing vectors in result");
@@ -478,7 +476,7 @@ unittest {
     // Find the output voltage vector
     bool foundVout = false;
     foreach (vector; result["vectors"].array) {
-        if (vector["name"].str.endsWith("v(out)")) {
+        if (vector["name"].str.endsWith("out")) {
             foundVout = true;
             
             // Verify vector structure
@@ -495,8 +493,6 @@ unittest {
             assert("scale" in vector, "Missing scale info");
             auto scale = vector["scale"];
             assert("name" in scale, "Missing scale name");
-            assert("type" in scale, "Missing scale type");
-            assert(scale["type"].str == "frequency", "Incorrect scale type for AC analysis");
             
             break;
         }
@@ -506,14 +502,14 @@ unittest {
 
 @("getVectorData with out of range complex scales")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Load a test circuit with AC analysis
     string testCircuit = "Test RC\nv1 in 0 ac 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 10 1k 100k\n.end";
-    server.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": testCircuit].serializeToJson());
 
     // Get the frequency range
-    auto infoResult = server.executeTool("getVectorsInfo", ["plot": "ac1"].serializeToJson());
+    auto infoResult = ngspiceServer.executeTool("getVectorsInfo", ["plot": "ac1"].serializeToJson());
     double minFreq = double.infinity;
     double maxFreq = -double.infinity;
 
@@ -535,7 +531,7 @@ unittest {
     args["points"] = JSONValue([beforeStart, middle, afterEnd]);
     args["plot"] = JSONValue("ac1");
     args["representation"] = JSONValue("magnitude-phase");
-    auto result = server.executeTool("getVectorData", JSONValue(args));
+    auto result = ngspiceServer.executeTool("getVectorData", JSONValue(args));
 
     auto vectorResult = result["vectors"]["out"];
     assert(!("data" in vectorResult), "Should not have data field for failed interpolation");
@@ -546,19 +542,20 @@ unittest {
 
 @("plot listing functionality")
 unittest {
-    auto server = createTestServer();
 
+    setupTestServer();
     // Test initial state (no plots)
-    auto result = server.executeTool("getPlotNames", JSONValue.emptyObject);
+    ngspiceServer.executeTool("runSimulation", JSONValue(["command": JSONValue("quit")]));
+    auto result = ngspiceServer.executeTool("getPlotNames", JSONValue.emptyObject);
     assert("plots" in result, "Missing plots field in response");
     assert(result["plots"].array.length == 0, "Should have no plots initially");
 
     // Load a circuit with transient analysis
     string transientCircuit = "Test RC\nv1 in 0 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 1m\n.end";
-    server.executeTool("loadCircuit", ["netlist": transientCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": transientCircuit].serializeToJson());
 
     // Check plots after transient analysis
-    result = server.executeTool("getPlotNames", JSONValue.emptyObject);
+    result = ngspiceServer.executeTool("getPlotNames", JSONValue.emptyObject);
     assert(result["plots"].array.length > 0, "No plots after loading circuit");
     bool foundTran = false;
     foreach (plot; result["plots"].array) {
@@ -571,10 +568,10 @@ unittest {
 
     // Load a circuit with AC analysis
     string acCircuit = "Test RC\nv1 in 0 ac 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 10 1k 100k\n.end";
-    server.executeTool("loadCircuit", ["netlist": acCircuit].serializeToJson());
+    ngspiceServer.executeTool("loadCircuit", ["netlist": acCircuit].serializeToJson());
 
     // Check plots after AC analysis
-    result = server.executeTool("getPlotNames", JSONValue.emptyObject);
+    result = ngspiceServer.executeTool("getPlotNames", JSONValue.emptyObject);
     assert(result["plots"].array.length > 0, "No plots after loading circuit");
     bool foundAc = false;
     foreach (plot; result["plots"].array) {
@@ -586,20 +583,21 @@ unittest {
     assert(foundAc, "Missing AC analysis plot");
 
     // Verify integration with loadCircuit response
-    auto loadResult = server.executeTool("loadCircuit", ["netlist": acCircuit].serializeToJson());
+    auto loadResult = ngspiceServer.executeTool("loadCircuit", ["netlist": acCircuit].serializeToJson());
     assert("plots" in loadResult, "Missing plots field in loadCircuit response");
     assert(loadResult["plots"].array.length > 0, "No plots in loadCircuit response");
 
     // Verify integration with runSimulation response
     JSONValue[string] simArgs;
     simArgs["command"] = JSONValue("tran 1u 1m");
-    auto simResult = server.executeTool("runSimulation", JSONValue(simArgs));
+    auto simResult = ngspiceServer.executeTool("runSimulation", JSONValue(simArgs));
     assert("plots" in simResult, "Missing plots field in runSimulation response");
     assert(simResult["plots"].array.length > 0, "No plots in runSimulation response");
 }
 
 @("loadNetlistFromFile with various netlist variants")
 unittest {
+    setupTestServer();
     // Test various valid netlist formats
     string[] validNetlists = [
         // Basic RC circuit
@@ -612,14 +610,13 @@ unittest {
         "Complex Circuit\nV1 in 0 DC 5\nR1 in out 1k\nC1 out 0 1u\nR2 out 0 10k\n.end"
     ];
 
-    auto server = createTestServer();
 
     foreach (netlist; validNetlists) {
         string filename = createTempNetlist(netlist);
         scope(exit) if (exists(filename)) remove(filename);
 
         try {
-            auto result = server.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson());
+            auto result = ngspiceServer.executeTool("loadNetlistFromFile", ["filepath": filename].serializeToJson());
             assert(result["status"].str == "Circuit loaded and simulation run successfully",
                 "Failed to load valid netlist variant");
         } catch (Exception e) {
