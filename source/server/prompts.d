@@ -79,14 +79,14 @@ Executes a simulation command in ngspice.
 
 ### 4. getPlotNames
 
-Retrieves the names of available simulation result plots.
+Retrieves a list of available simulation result plots.
 
 **Parameters:** None
 
 **Example Response:**
 ```json
 {
-  "plots": ["op1", "dc1", "ac1", "tran1"]
+  "plots": ["tran1", "ac1", "op1", "dc1"]
 }
 ```
 
@@ -94,28 +94,49 @@ Retrieves the names of available simulation result plots.
 - Plot names typically include a type prefix and number (e.g., "op1", "dc1")
 - The most recent plot of each type is usually numbered "1"
 
-### 5. getVectorNames
+### 5. getVectorsInfo
 
-Retrieves the names of vectors (data series) available in a specific plot.
+Retrieves detailed information about vectors (data series) available in a specific plot.
 
 **Parameters:**
-- `plot` (string, optional): The name of the plot to query. If omitted, uses the current plot.
+- `plot` (string, required): The name of the plot to query (e.g., 'tran1', 'ac1', 'dc1', 'op1'). Use getPlotNames to list available plots.
 
-**Examples:**
+**Example:**
 ```json
-// Query specific plot
 {
   "plot": "tran1"
 }
-
-// Query current plot
-{}
 ```
 
 **Example Response:**
 ```json
 {
-  "vectors": ["time", "v(out)", "v(in)", "i(v1)"]
+  "vectors": [
+    {
+      "name": "v(out)",
+      "isReal": true,
+      "range": {
+        "min": "0.00e+00",
+        "max": "4.98e+00"
+      },
+      "scale": {
+        "name": "time",
+        "type": "time"
+      }
+    },
+    {
+      "name": "v(in)",
+      "isReal": true,
+      "range": {
+        "min": "-1.00e+00",
+        "max": "1.00e+00"
+      },
+      "scale": {
+        "name": "time",
+        "type": "time"
+      }
+    }
+  ]
 }
 ```
 
@@ -125,6 +146,13 @@ Retrieves the names of vectors (data series) available in a specific plot.
   - Node voltages: `v(node_name)`
   - Branch currents: `i(component_name)`
   - Special vectors: `time`, `frequency`, etc.
+- Each vector includes:
+  - `isReal`: true for real data, false for complex data
+  - `type`: type of vector (e.g., time, frequency)
+  - `range`: minimum and maximum values
+  - `scale`: associated scale vector information
+    - `name`: name of the scale vector (e.g., time, frequency)
+- For complex data (like AC analysis), range uses magnitude values
 
 ### 6. getVectorData
 
@@ -132,17 +160,15 @@ Retrieves data for one or more vectors from a plot.
 
 **Parameters:**
 - `vectors` (array of strings, required): Names of vectors to retrieve
-- `plot` (string, optional): Name of the plot (uses current plot if omitted)
+- `plot` (string, required): Name of the plot. Use getPlotNames to list available plots.
+- `points` (array of numbers, required): Scale values at which to evaluate vectors through interpolation
 - `representation` (string, optional): Format for complex data:
   - `"magnitude-phase"` (default): Returns magnitude and phase in degrees
   - `"rectangular"`: Returns real and imaginary components
   - `"both"`: Returns both representations
-- `interval` (object, optional): Limits the data range:
-  - `start` (number, optional): Start value of the scale vector
-  - `end` (number, optional): End value of the scale vector
 
 **Configuration:**
-- Maximum points: Controlled by the `--max-points` command line option (default: 100)
+- Maximum points: Controlled by the `--max-points` command line option (default: 1000)
 - An error is returned if the number of points exceeds the configured limit
 
 **Example:**
@@ -150,9 +176,53 @@ Retrieves data for one or more vectors from a plot.
 {
   "vectors": ["v(out)", "v(in)"],
   "plot": "tran1",
-  "interval": {
-    "start": 0,
-    "end": 0.0005
+  "points": [0, 0.0001, 0.0002, 0.0003, 0.0004, 0.0005]
+}
+```
+
+**Example Response:**
+```json
+{
+  "vectors": {
+    "tran1.v(out)": {
+      "data": [0, 0.632, 0.865, 0.95, 0.982, 0.993],
+      "points": [0, 0.0001, 0.0002, 0.0003, 0.0004, 0.0005]
+    },
+    "tran1.v(in)": {
+      "data": [5, 5, 5, 5, 5, 5],
+      "points": [0, 0.0001, 0.0002, 0.0003, 0.0004, 0.0005]
+    }
+  }
+}
+```
+
+**Notes:**
+- For AC analysis, data is complex and will be formatted according to the `representation` parameter
+- Linear interpolation is used to compute values at requested points
+- Points outside the simulation range will use the nearest data value
+- Vector names are automatically prefixed with the plot name if not already included
+
+### 7. getLocalExtrema
+
+Finds local minima and maxima in vector data.
+
+**Parameters:**
+- `vectors` (array of strings, required): Names of vectors to analyze
+- `plot` (string, required): Name of the plot. Use getPlotNames to list available plots.
+- `options` (object, optional):
+  - `minima` (boolean, default: true): Include local minima in results
+  - `maxima` (boolean, default: true): Include local maxima in results
+  - `threshold` (number, default: 0): Minimum height difference for extrema detection
+
+**Example:**
+```json
+{
+  "vectors": ["v(out)"],
+  "plot": "tran1",
+  "options": {
+    "threshold": 0.1,
+    "minima": true,
+    "maxima": true
   }
 }
 ```
@@ -162,29 +232,31 @@ Retrieves data for one or more vectors from a plot.
 {
   "vectors": {
     "tran1.v(out)": {
-      "length": 51,
-      "data": [0, 0.632, 0.865, 0.95, 0.982, 0.993, ...],
-      "interval": {
-        "start": 0,
-        "end": 0.0005
-      }
-    },
-    "tran1.v(in)": {
-      "length": 51,
-      "data": [5, 5, 5, 5, 5, 5, ...],
-      "interval": {
-        "start": 0,
-        "end": 0.0005
-      }
+      "length": 1000,
+      "maxima": [
+        {
+          "index": 125,
+          "value": "4.82e+00",
+          "scale": "2.50e-04"
+        }
+      ],
+      "minima": [
+        {
+          "index": 375,
+          "value": "1.84e-01",
+          "scale": "7.50e-04"
+        }
+      ]
     }
   }
 }
 ```
 
 **Notes:**
-- For AC analysis, data is complex and will be formatted according to the `representation` parameter
-- The `interval` parameter is useful for focusing on specific time/frequency ranges
-- Vector names are automatically prefixed with the plot name if not already included
+- The threshold parameter helps filter out minor fluctuations
+- For complex vectors, extrema are found in the magnitude
+- Each extremum includes the data index, value, and corresponding scale value
+- Points must meet the threshold requirement relative to both neighbors
 
 ## Model Database Features
 
@@ -323,7 +395,7 @@ Standard error output from ngspice. Check this resource for error messages and w
 
 4. Get vectors in the operating point plot:
 ```json
-// Tool: getVectorNames
+// Tool: getVectorsInfo
 {
   "plot": "op1"
 }
@@ -428,12 +500,12 @@ Standard error output from ngspice. Check this resource for error messages and w
 
 1. **Vector Selection**:
    - Request only the vectors you need
-   - Use interval parameters for large datasets
+   - Use appropriate interpolation points for the analysis
 
 2. **Point Management**:
-   - Use the interval parameter to limit data points
-   - Consider adjusting simulation step size
-   - Select relevant time/frequency ranges only
+   - Choose points strategically for your analysis needs
+   - Consider simulation step size for context
+   - Focus on regions of interest in the data
 
 3. **Complex Data**:
    - For AC analysis, choose the appropriate representation
@@ -475,7 +547,7 @@ Standard error output from ngspice. Check this resource for error messages and w
 3. **Data Access Errors**:
    - Vector data exceeds maximum points limit
    - Non-existent vectors or plots
-   - Invalid interval ranges
+   - Invalid interpolation points
 
 4. **Model Query Errors**:
    - Unrecognized model type

@@ -32,7 +32,6 @@ void main(string[] args) {
     }
     
     // Start server
-    writefln("Starting MCP server...");
     auto server = new NgspiceServer(100, config.workingDir);
     
     server.start();

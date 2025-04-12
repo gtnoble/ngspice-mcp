@@ -19,12 +19,12 @@ unittest {
     // Test vector_info structure
     vector_info vec;
     setString("test", vec.v_name);
-    vec.v_type = 1;
+    vec.v_type = simulation_types.SV_VOLTAGE;
     vec.v_flags = 0;
     vec.v_length = 10;
     
     assert(vec.v_name.fromStringz == "test");
-    assert(vec.v_type == 1);
+    assert(vec.v_type == simulation_types.SV_VOLTAGE);
     assert(vec.v_length == 10);
 
     // Test vecvalues structure

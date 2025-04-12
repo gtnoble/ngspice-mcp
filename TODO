@@ -1,5 +1,3 @@
 Allow simulation to time out if it runs too long.
 Add an optimization tool.
-Substitute runtime points limit into the prompt text.
-Have agents specify interpolating points, rather then obtaining all vector points at once.
-MCP tool for finding local extrema of vector points.
+Attempting to extrapolate should throw an exception.

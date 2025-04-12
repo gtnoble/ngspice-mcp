@@ -7,18 +7,111 @@
 module server.ngspice_server;
 
 import std.json : JSONValue;
-import std.string : toStringz;
+import std.string : toStringz, fromStringz;
 import std.algorithm : map;
 import std.array : array, split;
 import std.exception : enforce;
 import std.math : sqrt, atan2, PI, floor, log10, pow, abs, copysign, round, isFinite;
 import std.format : format;
 import std.algorithm : filter, min, max;
-import std.string : startsWith;
 import std.ascii : isDigit;
+import std.complex : Complex, arg, abs;
+import std.range : assumeSorted;
+import std.traits : isNumeric;
 
 import std.functional : toDelegate;
 import std.file : exists, readText;
+
+/**
+ * Type for interpolation functions that map a scale value to an interpolated value
+ */
+alias InterpolationFunction(S, T) = T delegate(S);
+
+/**
+ * Create an interpolation function for a set of values.
+ * 
+ * Params:
+ *   scaleValues = Array of scale values (e.g. time points)
+ *   values = Array of values to interpolate between
+ * Returns: A delegate that performs linear interpolation at any scale value
+ */
+InterpolationFunction!(double, T) findInterpolator(T)(const double[] scaleValues, const T[] values)
+if (is(T == double) || is(T == Complex!double))
+{
+    enforce(scaleValues.length >= 2, "Need at least 2 points for interpolation");
+    enforce(scaleValues.length == values.length, "Scale and value arrays must match");
+
+    return (double target) {
+            // Validate target is within domain
+            if (target < scaleValues[0] || target > scaleValues[$-1]) {
+                throw new MCPError(
+                    ErrorCode.invalidParams,
+                    format!"Target %g is outside interpolation domain [%g, %g]"(
+                        target, scaleValues[0], scaleValues[$-1]
+                    )
+                );
+            }
+
+            // Find surrounding indices using binary search
+            size_t idx2 = scaleValues.assumeSorted.lowerBound(target).length;
+            // Handle edge case where target is equal to the first scale value
+            if (idx2 == 0) {
+                return values[0];
+            }
+            size_t idx1 = idx2 - 1;
+
+            // Calculate interpolation parameter
+            auto t = (target - scaleValues[idx1]) / (scaleValues[idx2] - scaleValues[idx1]);
+
+            // Linear interpolation
+            return values[idx1] * (1.0 - t) + values[idx2] * t;
+    };
+}
+
+/**
+ * Create an interpolation function for a set of values.
+ * 
+ * Params:
+ *   scaleValues = Array of scale values (e.g. time points)
+ *   values = Array of values to interpolate between
+ * Returns: A delegate that performs linear interpolation at any scale value
+ */
+InterpolationFunction!(Complex!double, Complex!double) findInterpolator(T)(const Complex!double[] scaleValues, const T[] values)
+if (is(T == double) || is(T == Complex!double))
+{
+    enforce(scaleValues.length >= 2, "Need at least 2 points for interpolation");
+    enforce(scaleValues.length == values.length, "Scale and value arrays must match");
+
+    return (Complex!double target) {
+            // Validate target magnitude is within domain
+            double targetMag = abs(target);
+            double minMag = abs(scaleValues[0]);
+            double maxMag = abs(scaleValues[$-1]);
+            
+            if (targetMag < minMag || targetMag > maxMag) {
+                throw new MCPError(
+                    ErrorCode.invalidParams,
+                    format!"Target magnitude %g is outside interpolation domain [%g, %g]"(
+                        targetMag, minMag, maxMag
+                    )
+                );
+            }
+
+            // Find surrounding indices using magnitude-based binary search
+            size_t idx2 = scaleValues.map!(x => abs(x)).array.assumeSorted.lowerBound(abs(target)).length;           
+            // Handle edge case where target is equal to the first scale value
+            if (idx2 == 0) {
+                return Complex!(double)(values[0]);
+            }
+            size_t idx1 = idx2 - 1;
+
+            // Calculate interpolation parameter using complex arithmetic
+            auto t = (target - scaleValues[idx1]) / (scaleValues[idx2] - scaleValues[idx1]);
+            
+            // Linear interpolation with complex parameter
+            return values[idx1] * (Complex!double(1.0, 0) - t) + values[idx2] * t;
+    };
+}
 
 import mcp.transport.stdio : Transport;
 import mcp.server : MCPServer;
@@ -32,12 +125,27 @@ import server.output;
 import server.prompts : ngspiceUsagePrompt;
 
 /**
+ * Information about a vector including its scale, type and data
+ */
+private struct VectorInfo {
+    string name;              // Vector name
+    string scaleName;         // Name of the scale vector
+    simulation_types type;    // Vector type (voltage, current, etc)
+    double[] realData;        // Real data (if real vector)
+    Complex!double[] complexData;  // Complex data (if complex vector)
+    bool isReal;             // True if vector contains real data
+}
+
+/**
  * NgspiceServer extends MCPServer with ngspice-specific functionality.
  */
 class NgspiceServer : MCPServer {
     private bool initialized = false;
     private int maxPoints;
     private string workingDir;
+
+    // Map of plot name -> (vector name -> vector info)
+    private VectorInfo[string][string] vectorInfoMap;
 
     import std.typecons : Nullable, nullable;
 
@@ -152,7 +260,7 @@ class NgspiceServer : MCPServer {
             &runSimulationTool
         );
 
-        // Plot listing tool
+        // Simple plot listing tool
         addTool(
             "getPlotNames",
             "Get names of available plots",
@@ -160,44 +268,34 @@ class NgspiceServer : MCPServer {
             &getPlotNamesTool
         );
 
-        // Vector listing tool
+        // Vector listing tool with detailed info
         addTool(
-            "getVectorNames",
-            "Get names of vectors in a plot",
+            "getVectorsInfo",
+            "Get detailed information about vectors in a plot",
             SchemaBuilder.object()
                 .addProperty("plot", SchemaBuilder.string_()
-                    .optional()
-                    .setDescription("Name of the plot to query (e.g. 'tran1', 'ac1', 'dc1', 'op1'). Use getPlotNames to list available plots. If omitted, uses current plot.")),
-            &getVectorNamesTool
+                    .setDescription("Name of the plot to query (e.g. 'tran1', 'ac1', 'dc1', 'op1'). Use getPlotNames to list available plots.")),
+            &getVectorsInfoTool
         );
 
-        // Vector data tool
-        addTool(
-            "getVectorData",
-            "Get data for multiple vectors",
-            SchemaBuilder.object()
-                .addProperty("vectors", SchemaBuilder.array(SchemaBuilder.string_())
-                    .setDescription("Array of vector names to retrieve (e.g. ['v(out)', 'i(v1)']). Vector names are case-sensitive. Note: The number of returned points is limited by the --max-points command line option (default: 100)."))
-                .addProperty("plot", SchemaBuilder.string_()
-                    .optional()
-                    .setDescription("Name of the plot to query. If omitted, uses current plot."))
-                .addProperty("representation",
-                    SchemaBuilder.string_()
-                        .enum_(["magnitude-phase", "rectangular", "both"])
-                        .optional()
-                        .setDescription("Format for complex data:\n- magnitude-phase: Returns magnitude and phase in degrees\n- rectangular: Returns real and imaginary components\n- both: Returns both representations"))
-                .addProperty("interval",
-                    SchemaBuilder.object()
-                        .addProperty("start", SchemaBuilder.number()
-                            .optional()
-                            .setDescription("Start value of the scale vector (e.g. time or frequency)"))
-                        .addProperty("end", SchemaBuilder.number()
-                            .optional()
-                            .setDescription("End value of the scale vector (e.g. time or frequency)"))
-                        .optional()
-                        .setDescription("Optional interval to limit data range")),
-            &getVectorDataTool
-        );
+// Vector data tool
+addTool(
+    "getVectorData",
+    "Get data for multiple vectors",
+    SchemaBuilder.object()
+        .addProperty("vectors", SchemaBuilder.array(SchemaBuilder.string_())
+            .setDescription("Array of vector names to retrieve (e.g. ['v(out)', 'i(v1)']). Vector names are case-sensitive."))
+        .addProperty("plot", SchemaBuilder.string_()
+            .setDescription("Name of the plot to query. Use getPlotNames to list available plots."))
+        .addProperty("points", SchemaBuilder.array(SchemaBuilder.number())
+            .setDescription("Array of scale values at which to evaluate the vectors through interpolation"))
+        .addProperty("representation",
+            SchemaBuilder.string_()
+                .enum_(["magnitude-phase", "rectangular", "both"])
+                .optional()
+                .setDescription("Format for complex data:\n- magnitude-phase: Returns magnitude and phase in degrees\n- rectangular: Returns real and imaginary components\n- both: Returns both representations")),
+    &getVectorDataTool
+);
 
         // Local extrema tool
         addTool(
@@ -207,8 +305,7 @@ class NgspiceServer : MCPServer {
                 .addProperty("vectors", SchemaBuilder.array(SchemaBuilder.string_())
                     .setDescription("Array of vector names to analyze (e.g. ['v(out)', 'i(v1)']). Vector names are case-sensitive."))
                 .addProperty("plot", SchemaBuilder.string_()
-                    .optional()
-                    .setDescription("Name of the plot to query. If omitted, uses current plot."))
+                    .setDescription("Name of the plot to query. Use getPlotNames to list available plots."))
                 .addProperty("options", SchemaBuilder.object()
                     .addProperty("minima", SchemaBuilder.boolean()
                         .optional()
@@ -220,16 +317,7 @@ class NgspiceServer : MCPServer {
                         .optional()
                         .setDescription("Minimum height difference for extrema detection (default: 0)"))
                     .optional()
-                    .setDescription("Options for extrema detection"))
-                .addProperty("interval", SchemaBuilder.object()
-                    .addProperty("start", SchemaBuilder.number()
-                        .optional()
-                        .setDescription("Start value of the scale vector (e.g. time or frequency)"))
-                    .addProperty("end", SchemaBuilder.number()
-                        .optional()
-                        .setDescription("End value of the scale vector (e.g. time or frequency)"))
-                    .optional()
-                    .setDescription("Optional interval to limit data range")),
+                    .setDescription("Options for extrema detection")),
             &getLocalExtremaTool
         );
     }
@@ -245,13 +333,13 @@ class NgspiceServer : MCPServer {
         // Initialize ngspice
         enforce(
             ngSpice_Init(
-                &outputCallback,      // Stdout/stderr handler
-                null,                 // Status handler (unused)
-                &ngspiceExit,        // Exit handler
-                null,                 // Data handler (unused)
-                null,                 // Init handler (unused)
-                null,                 // BGThread handler (unused)
-                null                 // User data (unused)
+            &outputCallback,      // Stdout/stderr handler
+            null,                 // Status handler (unused)
+            &ngspiceExit,        // Exit handler
+            &dataCallback,        // Data handler
+            &initDataCallback,    // Init handler
+            null,                 // BGThread handler (unused)
+            cast(void*)this      // Pass this as user_data
             ) == 0,
             "Failed to initialize ngspice"
         );
@@ -290,12 +378,12 @@ class NgspiceServer : MCPServer {
             "Failed to run simulation"
         );
 
-        // Get plots using existing tool
+        // Get plots using getPlotNames
         auto plotsResult = getPlotNamesTool(JSONValue.emptyObject);
         
         return JSONValue([
             "status": JSONValue("Circuit loaded and simulation run successfully"),
-            "plots": plotsResult["plots"]  // Add plots from getPlotNamesTool
+            "plots": plotsResult["plots"]
         ]);
     }
 
@@ -308,66 +396,86 @@ class NgspiceServer : MCPServer {
             "Simulation command failed"
         );
 
-        // Get plots using existing tool
+        // Get plots using getPlotNames
         auto plotsResult = getPlotNamesTool(JSONValue.emptyObject);
         
         return JSONValue([
             "status": JSONValue("Command executed successfully"),
-            "plots": plotsResult["plots"]  // Add plots from getPlotNamesTool
+            "plots": plotsResult["plots"]
         ]);
     }
 
     private JSONValue getPlotNamesTool(JSONValue args) {
         enforce(this.initialized, "Ngspice not initialized");
 
-        char** plots = ngSpice_AllPlots();
-        string[] plotNames;
-        
-        for (int i = 0; plots[i] != null; i++) {
-            import std.string : fromStringz;
-            plotNames ~= plots[i].fromStringz.idup;
-        }
+        string[] plotNames = vectorInfoMap.keys;
 
         return JSONValue([
-            "plots": plotNames
+            "plots": JSONValue(plotNames)
         ]);
     }
 
-    private JSONValue getVectorNamesTool(JSONValue args) {
+    private JSONValue getVectorsInfoTool(JSONValue args) {
         enforce(this.initialized, "Ngspice not initialized");
 
-        // Get plot name - either specified or current
-        string plotName;
-        if ("plot" in args) {
-            plotName = args["plot"].str;
-            // Verify plot exists
-            bool plotFound = false;
-            char** plots = ngSpice_AllPlots();
-            for (int i = 0; plots[i] != null; i++) {
-                import std.string : fromStringz;
-                if (plots[i].fromStringz == plotName) {
-                    plotFound = true;
-                    break;
-                }
+        // Get plot name
+        enforce("plot" in args, "Plot name must be specified");
+        string plotName = args["plot"].str;
+        enforce(plotName in vectorInfoMap, "Specified plot does not exist: " ~ plotName);
+
+        JSONValue[] vectorsInfo;
+        
+        // Get plot's vector info mapping
+        auto plotVectors = vectorInfoMap.get(plotName, null);
+
+        foreach (vectorName, vecInfo; plotVectors) {
+
+        // Calculate min/max values
+        JSONValue range;
+        if (vecInfo.isReal && vecInfo.realData.length > 0) {
+            // Real data
+            double minVal = vecInfo.realData[0];
+            double maxVal = vecInfo.realData[0];
+            foreach (val; vecInfo.realData) {
+                if (val < minVal) minVal = val;
+                if (val > maxVal) maxVal = val;
             }
-            enforce(plotFound, "Specified plot does not exist: " ~ plotName);
-        } else {
-            char* curPlot = ngSpice_CurPlot();
-            enforce(curPlot !is null, "No current plot available");
-            import std.string : fromStringz;
-            plotName = curPlot.fromStringz.idup;
+            range = JSONValue([
+                "min": JSONValue(minVal),
+                "max": JSONValue(maxVal)
+            ]);
+        }
+        else if (!vecInfo.isReal && vecInfo.complexData.length > 0) {
+            // Complex data - use magnitude
+            double minVal = double.infinity;
+            double maxVal = -double.infinity;
+            foreach (val; vecInfo.complexData) {
+                double mag = abs(val);  // Using Complex type's abs function
+                if (mag < minVal) minVal = mag;
+                if (mag > maxVal) maxVal = mag;
+            }
+            range = JSONValue([
+                "min": JSONValue(minVal),
+                "max": JSONValue(maxVal)
+            ]);
         }
 
-        char** vectors = ngSpice_AllVecs(plotName.toStringz());
-        string[] vectorNames;
-        
-        for (int i = 0; vectors[i] != null; i++) {
-            import std.string : fromStringz;
-            vectorNames ~= vectors[i].fromStringz.idup;
+        // Build vector info object
+        JSONValue vectorInfo = JSONValue([
+            "name": JSONValue(vecInfo.name),
+            "type": JSONValue(simulationTypeToString(vecInfo.type)),
+            "isReal": JSONValue(vecInfo.isReal),
+            "range": range,
+            "scale": JSONValue([
+                "name": JSONValue(vecInfo.scaleName)
+            ])
+        ]);
+
+        vectorsInfo ~= vectorInfo;
         }
 
         return JSONValue([
-            "vectors": vectorNames
+            "vectors": JSONValue(vectorsInfo)
         ]);
     }
 
@@ -403,175 +511,125 @@ class NgspiceServer : MCPServer {
         ]));
     }
 
-    /**
-     * Find the indices in a real array that correspond to an interval
-     */
-    private void findIntervalIndices(const double[] values, double start, double end, out int startIdx, out int endIdx) {
-        import std.algorithm : min, max;
-        
-        // Handle missing bounds
-        if (start == double.nan) start = values[0];
-        if (end == double.nan) end = values[$-1];
+private JSONValue getVectorDataTool(JSONValue args) {
+    enforce(this.initialized, "Ngspice not initialized");
 
-        // Ensure valid order
-        if (start > end) {
-            auto tmp = start;
-            start = end;
-            end = tmp;
-        }
+    // Get plot name
+    enforce("plot" in args, "Plot name must be specified");
+    string plotName = args["plot"].str;
+    enforce(plotName in vectorInfoMap, "Specified plot does not exist: " ~ plotName);
 
-        // Find indices using binary search
-        startIdx = 0;
-        endIdx = cast(int)values.length - 1;
+    // Get plot's vector info mapping
+    auto plotVectors = vectorInfoMap.get(plotName, null);
+    enforce(plotVectors !is null, "No vector information available for plot: " ~ plotName);
 
-        // Find start index
-        int low = 0;
-        int high = cast(int)values.length - 1;
-        while (low <= high) {
-            int mid = (low + high) / 2;
-            if (values[mid] < start)
-                low = mid + 1;
-            else
-                high = mid - 1;
-        }
-        startIdx = max(0, low);
-
-        // Find end index
-        low = startIdx;
-        high = cast(int)values.length - 1;
-        while (low <= high) {
-            int mid = (low + high) / 2;
-            if (values[mid] <= end)
-                low = mid + 1;
-            else
-                high = mid - 1;
-        }
-        endIdx = min(cast(int)values.length - 1, high);
+    // Get interpolation points
+    double[] points;
+    foreach (point; args["points"].array) {
+        points ~= point.get!double;
     }
+    
+    // Check points are within scale range
+    enforce(points.length > 0, "No interpolation points provided");
+    enforce(points.length <= maxPoints, 
+        format!"Number of interpolation points (%d) exceeds maximum limit (%d)"(
+            points.length, maxPoints
+        )
+    );
 
-    private JSONValue getVectorDataTool(JSONValue args) {
-        enforce(this.initialized, "Ngspice not initialized");
+    // Process each vector
+    JSONValue[string] vectorData;
+    foreach (vector; args["vectors"].array) {
+        string vectorName = vector.str;
+        
+        // Look up vector info
+        auto vecInfoPtr = vectorName in plotVectors;
+        if (vecInfoPtr is null) {
+            vectorData[vectorName] = JSONValue([
+                "error": "Vector not found"
+            ]);
+            continue;
+        }
+        auto vecInfo = *vecInfoPtr;
 
-        // Get plot name - either specified or current
-        string plotName;
-        if ("plot" in args) {
-            plotName = args["plot"].str;
-            // Verify plot exists
-            bool plotFound = false;
-            char** plots = ngSpice_AllPlots();
-            for (int i = 0; plots[i] != null; i++) {
-                import std.string : fromStringz;
-                if (plots[i].fromStringz == plotName) {
-                    plotFound = true;
-                    break;
-                }
-            }
-            enforce(plotFound, "Specified plot does not exist: " ~ plotName);
-        } else {
-            char* curPlot = ngSpice_CurPlot();
-            enforce(curPlot !is null, "No current plot available");
-            import std.string : fromStringz;
-            plotName = curPlot.fromStringz.idup;
+        // Look up scale vector info
+        auto scaleVecInfoPtr = vecInfo.scaleName in plotVectors;
+        if (scaleVecInfoPtr is null) {
+            vectorData[vectorName] = JSONValue([
+                "error": format!"Scale vector not available: %s"(vecInfo.scaleName)
+            ]);
+            continue;
+        }
+        auto scaleVecInfo = *scaleVecInfoPtr;
+        enforce(
+            (scaleVecInfo.isReal && scaleVecInfo.realData.length > 0) ||
+            (!scaleVecInfo.isReal && scaleVecInfo.complexData.length > 0),
+            "Scale vector data not valid or empty: " ~ vecInfo.scaleName
+        );
+
+        // Handle empty vector
+        if ((vecInfo.isReal && vecInfo.realData.length == 0) ||
+            (!vecInfo.isReal && vecInfo.complexData.length == 0)) {
+            vectorData[vectorName] = JSONValue([
+                "length": JSONValue(0),
+                "data": JSONValue.emptyArray
+            ]);
+            continue;
         }
 
-        JSONValue[string] vectorData;
-        foreach (vector; args["vectors"].array) {
-            string vectorName = vector.str;
-            
-            // Format vector name with plot prefix if not already included
-            if (!vectorName.startsWith(plotName ~ ".")) {
-                vectorName = plotName ~ "." ~ vectorName;
-            }
-            
-            vector_info_ptr vec = ngGet_Vec_Info(vectorName.toStringz());
-            
-            // Handle vector not found
-            if (vec is null) {
-                vectorData[vectorName] = JSONValue([
-                    "error": "Vector not found"
-                ]);
-                continue;
-            }
+        // Get representation format
+        string representation = "magnitude-phase";
+        if ("representation" in args) {
+            representation = args["representation"].str;
+        }
 
-            // Handle empty vector
-            if (vec.v_length == 0) {
-                vectorData[vectorName] = JSONValue([
-                    "length": JSONValue(0),
-                    "data": JSONValue.emptyArray
-                ]);
-                continue;
-            }
-
-            // Get interval bounds if specified
-            int startIdx = 0;
-            int endIdx = vec.v_length - 1;
-            JSONValue intervalInfo;
-
-            // Calculate points count before processing interval
-            int totalPoints = vec.v_length;
-
-            if ("interval" in args) {
-                auto interval = args["interval"];
-                double start = ("start" in interval) ? interval["start"].get!double : double.nan;
-                double end = ("end" in interval) ? interval["end"].get!double : double.nan;
-
-                // Find scale vector using specified plot
-                vector_info_ptr scale = ngGet_Vec_Info((plotName ~ ".scale").toStringz);
-                if (scale && scale.v_realdata) {
-                    findIntervalIndices(scale.v_realdata[0..scale.v_length], start, end, startIdx, endIdx);
-                    intervalInfo = JSONValue([
-                        "start": scale.v_realdata[startIdx],
-                        "end": scale.v_realdata[endIdx]
-                    ]);
+        // Create interpolator for the vector
+        JSONValue[] data;
+        JSONValue[] scaleData;
+        
+        if (vecInfo.isReal) {
+            if (scaleVecInfo.isReal) {
+                auto interpolator = findInterpolator!(double)(scaleVecInfo.realData, vecInfo.realData);
+                foreach (point; points) {
+                    data ~= JSONValue(interpolator(point));
+                    scaleData ~= JSONValue(point);
                 }
             }
-
-            // Check number of points after interval selection
-            int pointCount = endIdx - startIdx + 1;
-            if (pointCount > maxPoints) {
-                throw new MCPError(
-                    ErrorCode.invalidRequest,
-                    format!"Vector data exceeds maximum points limit (%d points requested, limit is %d)"(
-                        pointCount, maxPoints
-                    )
-                );
-            }
-
-            // Extract data for the interval
-            JSONValue[] data;
-            string representation = "magnitude-phase";
-            if ("representation" in args) {
-                representation = args["representation"].str;
-            }
-
-            if (vec.v_realdata) {
-                // Real data
-                for (int i = startIdx; i <= endIdx; i++) {
-                    data ~= JSONValue(formatScientific(vec.v_realdata[i]));
-                }
-            } else if (vec.v_compdata) {
-                // Complex data
-                for (int i = startIdx; i <= endIdx; i++) {
-                    data ~= formatComplexValue(
-                        vec.v_compdata[i].cx_real,
-                        vec.v_compdata[i].cx_imag,
-                        representation
-                    );
+            else {
+                auto interpolator = findInterpolator!(double)(scaleVecInfo.complexData, vecInfo.realData);
+                foreach (point; points) {
+                    auto value = interpolator(Complex!(double)(point));
+                    data ~= formatComplexValue(value, representation);
+                    scaleData ~= JSONValue(point);
                 }
             }
-
-            // Create result
-            JSONValue result = JSONValue([
-                "length": JSONValue(endIdx - startIdx + 1),
-                "data": JSONValue(data)
-            ]);
-
-            // Add interval info if present
-            if (intervalInfo != JSONValue.init) {
-                result["interval"] = intervalInfo;
+        } else {
+            if (scaleVecInfo.isReal) {
+                auto interpolator = findInterpolator!(Complex!double)(scaleVecInfo.realData, vecInfo.complexData);
+                foreach (point; points) {
+                    auto value = interpolator(point);
+                    data ~= formatComplexValue(value, representation);
+                    scaleData ~= JSONValue(point);
+                }
             }
+            else {
+                auto interpolator = findInterpolator!(Complex!double)(scaleVecInfo.complexData, vecInfo.complexData);
+                foreach (point; points) {
+                    auto value = interpolator(Complex!(double)(point));
+                    data ~= formatComplexValue(value, representation);
+                    scaleData ~= JSONValue(point);
+                }
+            }
+        }
 
-            vectorData[vectorName] = result;
+        // Store result
+        JSONValue result = JSONValue([
+            "data": JSONValue(data),
+            "points": JSONValue(scaleData)
+        ]);
+
+
+        vectorData[vectorName] = result;
         }
 
         return JSONValue([
@@ -582,27 +640,14 @@ class NgspiceServer : MCPServer {
     private JSONValue getLocalExtremaTool(JSONValue args) {
         enforce(this.initialized, "Ngspice not initialized");
 
-        // Get plot name - either specified or current
-        string plotName;
-        if ("plot" in args) {
-            plotName = args["plot"].str;
-            // Verify plot exists
-            bool plotFound = false;
-            char** plots = ngSpice_AllPlots();
-            for (int i = 0; plots[i] != null; i++) {
-                import std.string : fromStringz;
-                if (plots[i].fromStringz == plotName) {
-                    plotFound = true;
-                    break;
-                }
-            }
-            enforce(plotFound, "Specified plot does not exist: " ~ plotName);
-        } else {
-            char* curPlot = ngSpice_CurPlot();
-            enforce(curPlot !is null, "No current plot available");
-            import std.string : fromStringz;
-            plotName = curPlot.fromStringz.idup;
-        }
+        // Get plot name
+        enforce("plot" in args, "Plot name must be specified");
+        string plotName = args["plot"].str;
+        enforce(plotName in vectorInfoMap, "Specified plot does not exist: " ~ plotName);
+
+        // Get plot's vector info mapping
+        auto plotVectors = vectorInfoMap.get(plotName, null);
+        enforce(plotVectors !is null, "No vector information available for plot: " ~ plotName);
 
         // Get options
         bool findMinima = true;
@@ -621,57 +666,79 @@ class NgspiceServer : MCPServer {
         foreach (vector; args["vectors"].array) {
             string vectorName = vector.str;
             
-            // Format vector name with plot prefix if not already included
-            if (!vectorName.startsWith(plotName ~ ".")) {
-                vectorName = plotName ~ "." ~ vectorName;
-            }
-            
-            vector_info_ptr vec = ngGet_Vec_Info(vectorName.toStringz());
-            
-            // Handle vector not found
-            if (vec is null) {
+            // Look up vector info
+            auto vecInfoPtr = vectorName in plotVectors;
+            if (vecInfoPtr is null) {
                 vectorData[vectorName] = JSONValue([
                     "error": "Vector not found"
                 ]);
                 continue;
             }
+            auto vecInfo = *vecInfoPtr;
 
-            // Get interval bounds if specified
-            int startIdx = 0;
-            int endIdx = vec.v_length - 1;
-            JSONValue intervalInfo;
+            // Look up scale vector info
+            auto scaleVecInfoPtr = vecInfo.scaleName in plotVectors;
+            if (scaleVecInfoPtr is null) {
+                vectorData[vectorName] = JSONValue([
+                    "error": format!"Scale vector not available: %s"(vecInfo.scaleName)
+                ]);
+                continue;
+            }
+            auto scaleVecInfo = *scaleVecInfoPtr;
+            if (!scaleVecInfo.isReal || scaleVecInfo.realData.length == 0) {
+                vectorData[vectorName] = JSONValue([
+                    "error": format!"Scale vector data not valid: %s"(vecInfo.scaleName)
+                ]);
+                continue;
+            }
 
-            if ("interval" in args) {
-                auto interval = args["interval"];
-                double start = ("start" in interval) ? interval["start"].get!double : double.nan;
-                double end = ("end" in interval) ? interval["end"].get!double : double.nan;
+            // Process vector data and find extrema
+            double[] values;
+            if (vecInfo.isReal && vecInfo.realData.length > 0) {
+                values = vecInfo.realData.dup;
+            } else if (!vecInfo.isReal && vecInfo.complexData.length > 0) {
+                values = new double[](vecInfo.complexData.length);
+                foreach (i, v; vecInfo.complexData) {
+                    values[i] = abs(v);  // Using Complex type's abs function
+                }
+            } else {
+                vectorData[vectorName] = JSONValue([
+                    "length": JSONValue(0),
+                    "maxima": JSONValue.emptyArray,
+                    "minima": JSONValue.emptyArray
+                ]);
+                continue;
+            }
 
-                // Find scale vector using specified plot
-                vector_info_ptr scale = ngGet_Vec_Info((plotName ~ ".scale").toStringz);
-                if (scale && scale.v_realdata) {
-                    findIntervalIndices(scale.v_realdata[0..scale.v_length], start, end, startIdx, endIdx);
-                    intervalInfo = JSONValue([
-                        "start": scale.v_realdata[startIdx],
-                        "end": scale.v_realdata[endIdx]
-                    ]);
+            // Find extrema
+            int[] extremaIndices = findLocalExtrema(values, threshold, findMinima, findMaxima);
+
+            // Build result arrays
+            JSONValue[] minima;
+            JSONValue[] maxima;
+
+            foreach (idx; extremaIndices) {
+                // Create extremum point info
+                JSONValue point = JSONValue([
+                    "index": JSONValue(idx),
+                    "value": JSONValue(values[idx]),
+                    "scale": JSONValue(scaleVecInfo.realData[idx])
+                ]);
+
+                // Add to appropriate array
+                if (findMinima && values[idx] < values[max(0, idx-1)] && values[idx] < values[min($-1, idx+1)]) {
+                    minima ~= point;
+                }
+                else if (findMaxima && values[idx] > values[max(0, idx-1)] && values[idx] > values[min($-1, idx+1)]) {
+                    maxima ~= point;
                 }
             }
 
-            // Get scale vector for result formatting
-            vector_info_ptr scale = ngGet_Vec_Info((plotName ~ ".scale").toStringz);
-
-            // Process vector and find extrema
-            JSONValue result = processVectorExtrema(
-                vec, scale, startIdx, endIdx,
-                findMinima, findMaxima, threshold
-            );
-
-            // Add interval info if present
-            if (intervalInfo != JSONValue.init) {
-                result["interval"] = intervalInfo;
-            }
-
-            vectorData[vectorName] = result;
+            vectorData[vectorName] = JSONValue([
+                "length": JSONValue(values.length),
+                "maxima": JSONValue(maxima),
+                "minima": JSONValue(minima)
+            ]);
         }
 
         return JSONValue([
@@ -681,48 +748,30 @@ class NgspiceServer : MCPServer {
 }
 
 /**
- * Format a number in scientific notation with specified decimal places.
- *
- * Params:
- *   value = The number to format
- *   decimalPlaces = Number of decimal places (default: 2)
- * Returns: String representation in scientific notation
- */
-private string formatScientific(double value, int decimalPlaces = 2) {
-    import std.math : isFinite;
-    import std.format : format;
-    
-    if (!value.isFinite) return format!"%g"(value);
-    if (value == 0.0) return format!"0.%de+00"(decimalPlaces);
-    
-    return format!"%.*e"(decimalPlaces, value);
-}
-
-/**
  * Format a complex value according to the specified representation.
  */
-private JSONValue formatComplexValue(double real_part, double imag_part, string representation) {
-    double magnitude = sqrt(real_part * real_part + imag_part * imag_part);
-    double phase = atan2(imag_part, real_part) * (180.0 / PI);  // Convert to degrees
+private JSONValue formatComplexValue(Complex!double value, string representation) {
+    double magnitude = abs(value);
+    double phase = arg(value) * (180.0 / PI);  // Convert radians to degrees
     
     if (representation == "magnitude-phase") {
         return JSONValue([
-            "magnitude": formatScientific(magnitude),
-            "phase": formatScientific(phase) 
+            "magnitude": JSONValue(magnitude),
+            "phase": JSONValue(phase)
         ]);
     }
     else if (representation == "rectangular") {
         return JSONValue([
-            "real": formatScientific(real_part),
-            "imag": formatScientific(imag_part)
+            "real": JSONValue(value.re),
+            "imag": JSONValue(value.im)
         ]);
     }
     else { // "both"
         return JSONValue([
-            "real": formatScientific(real_part),
-            "imag": formatScientific(imag_part),
-            "magnitude": formatScientific(magnitude),
-            "phase": formatScientific(phase)
+            "real": JSONValue(value.re),
+            "imag": JSONValue(value.im),
+            "magnitude": JSONValue(magnitude),
+            "phase": JSONValue(phase)
         ]);
     }
 }
@@ -773,73 +822,107 @@ private int[] findLocalExtrema(const double[] values, double threshold = 0.0, bo
     return extremaIndices;
 }
 
+
+
 /**
- * Get local extrema for a vector.
+ * Convert simulation_types enum to string representation.
+ *
+ * Params:
+ *   type = The simulation_types enum value
+ * Returns: String representation of the simulation type
  */
-private JSONValue processVectorExtrema(vector_info_ptr vec, vector_info_ptr scale, int startIdx, int endIdx, 
-                                     bool findMinima, bool findMaxima, double threshold) {
-    if (vec.v_length == 0) {
-        return JSONValue([
-            "length": JSONValue(0),
-            "maxima": JSONValue.emptyArray,
-            "minima": JSONValue.emptyArray
-        ]);
+private string simulationTypeToString(simulation_types type) {
+    switch(type) {
+        case simulation_types.SV_NOTYPE: return "none";
+        case simulation_types.SV_TIME: return "time";
+        case simulation_types.SV_FREQUENCY: return "frequency";
+        case simulation_types.SV_VOLTAGE: return "voltage";
+        case simulation_types.SV_CURRENT: return "current";
+        case simulation_types.SV_VOLTAGE_DENSITY: return "voltage_density";
+        case simulation_types.SV_CURRENT_DENSITY: return "current_density";
+        case simulation_types.SV_SQR_VOLTAGE_DENSITY: return "squared_voltage_density";
+        case simulation_types.SV_SQR_CURRENT_DENSITY: return "squared_current_density";
+        case simulation_types.SV_SQR_VOLTAGE: return "squared_voltage";
+        case simulation_types.SV_SQR_CURRENT: return "squared_current";
+        case simulation_types.SV_POLE: return "pole";
+        case simulation_types.SV_ZERO: return "zero";
+        case simulation_types.SV_SPARAM: return "s_parameter";
+        case simulation_types.SV_TEMP: return "temperature";
+        case simulation_types.SV_RES: return "resistance";
+        case simulation_types.SV_IMPEDANCE: return "impedance";
+        case simulation_types.SV_ADMITTANCE: return "admittance";
+        case simulation_types.SV_POWER: return "power";
+        case simulation_types.SV_PHASE: return "phase";
+        case simulation_types.SV_DB: return "decibel";
+        case simulation_types.SV_CAPACITANCE: return "capacitance";
+        case simulation_types.SV_CHARGE: return "charge";
+        default: return "unknown";
     }
-
-    // Get values for analysis
-    double[] values;
-    values.length = endIdx - startIdx + 1;
-
-    if (vec.v_realdata) {
-        // Real data - use directly
-        for (int i = startIdx; i <= endIdx; i++) {
-            values[i - startIdx] = vec.v_realdata[i];
-        }
-    }
-    else if (vec.v_compdata) {
-        // Complex data - use magnitude
-        for (int i = startIdx; i <= endIdx; i++) {
-            double realPart = vec.v_compdata[i].cx_real;
-            double imagPart = vec.v_compdata[i].cx_imag;
-            values[i - startIdx] = sqrt(realPart * realPart + imagPart * imagPart);
-        }
-    }
-
-    // Find extrema
-    int[] extremaIndices = findLocalExtrema(values, threshold, findMinima, findMaxima);
-
-    // Build result arrays
-    JSONValue[] minima;
-    JSONValue[] maxima;
-
-    foreach (int idx; extremaIndices) {
-        // Create extremum point info
-        JSONValue point = JSONValue([
-            "index": JSONValue(idx + startIdx),
-            "value": JSONValue(formatScientific(values[idx]))
-        ]);
-
-        // Add scale value if available
-        if (scale && scale.v_realdata) {
-            point["scale"] = JSONValue(formatScientific(scale.v_realdata[idx + startIdx]));
-        }
-
-        // Add to appropriate array
-        if (findMinima && values[idx] < values[max(0, idx-1)] && values[idx] < values[min($-1, idx+1)]) {
-            minima ~= point;
-        }
-        else if (findMaxima && values[idx] > values[max(0, idx-1)] && values[idx] > values[min($-1, idx+1)]) {
-            maxima ~= point;
-        }
-    }
-
-    return JSONValue([
-        "length": JSONValue(endIdx - startIdx + 1),
-        "maxima": JSONValue(maxima),
-        "minima": JSONValue(minima)
-    ]);
 }
 
+/**
+ * Callback for receiving initial vector information
+ */
+extern(C) static int initDataCallback(vecinfoall_ptr data, int id, void* user_data) {
+    auto server = cast(NgspiceServer)user_data;
+    string plotName = data.type.fromStringz.idup;
+    
+    // Create/clear map for this plot
+    VectorInfo[string] plotVectors;
+    
+    // Process each vector
+    for (int i = 0; i < data.veccount; i++) {
+        auto vec = data.vecs[i];
+        if (vec.pdvecscale) {
+            string vecName = vec.vecname.fromStringz.idup;
+            VectorInfo info;
+            info.name = vecName;
+            info.scaleName = vec.pdvecscale.v_name.fromStringz.idup;
+            info.type = vec.pdvec.v_type;
+            info.isReal = vec.is_real;
+            plotVectors[vecName] = info;
+        }
+    }
+    
+    // Store in plot map
+    server.vectorInfoMap[plotName] = plotVectors;
+    return 0;
+}
+
+/**
+ * Callback for receiving vector data during simulation
+ */
+extern(C) static int dataCallback(vecvaluesall_ptr data, int count, int id, void* user_data) {
+    auto server = cast(NgspiceServer)user_data;
+    
+    // Get current plot name
+    char* curPlot = ngSpice_CurPlot();
+    if (curPlot is null) return 0;
+    string plotName = curPlot.fromStringz.idup;
+    
+    auto plotVectors = plotName in server.vectorInfoMap;
+    if (plotVectors is null) return 0;
+
+    // Process vector values
+    for (int i = 0; i < data.veccount; i++) {
+        auto val = data.vecsa[i];
+        string vecName = val.name.fromStringz.idup;
+        
+        // Look up vector info
+        auto vecInfo = vecName in *plotVectors;
+        if (vecInfo is null) continue;
+
+        if (val.is_complex) {
+            // Add complex value
+            (*vecInfo).complexData ~= Complex!double(val.real_value, val.imag_value);
+        } else {
+            // Add real value
+            (*vecInfo).realData ~= val.real_value;
+        }
+    }
+    
+    return 0;
+}
 
 /**
  * Exit handler callback for ngspice
