@@ -6,7 +6,7 @@
     "license": "MIT",
     "dependencies": {
         "mcp": {
-            "path": "../d-mcp-server"
+            "version": "*"
         }
     },
     "configurations": [
