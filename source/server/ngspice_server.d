@@ -19,6 +19,8 @@ import std.ascii : isDigit;
 import std.complex : Complex, arg, abs;
 import std.range : assumeSorted;
 import std.traits : isNumeric;
+import std.string : strip, toLower;
+
 
 import std.functional : toDelegate;
 import std.file : exists, readText;
@@ -145,8 +147,7 @@ import bindings.ngspice :
     ngSpice_Command,
     ngSpice_Circ,
     ngSpice_CurPlot,
-    dvec,
-    ngSpice_Reset;
+    dvec;
 import server.output : 
     outputCallback,
     getStdout,
@@ -370,6 +371,17 @@ private JSONValue loadCircuitTool(JSONValue args)
 
         auto netlist = args["netlist"].str;
         auto lines = netlist.split("\n");
+
+        // Check for quit command
+        foreach (line; lines) {
+            if (line.strip.toLower == "quit") {
+                throw new MCPError(
+                    ErrorCode.invalidParams,
+                    "Quit command is not supported in netlists"
+                );
+            }
+        }
+
         char*[] clines;
         clines.length = lines.length;
         for (int i = 0; i < clines.length; i++)
